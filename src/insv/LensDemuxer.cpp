@@ -244,7 +244,16 @@ bool LensDemuxer::open(const std::string& path, const DecoderSetup& setup, std::
         return false;
     const AVFormatContext* fmt = m_inputs[0].fmt;
     for (unsigned i = 0; i < fmt->nb_streams; ++i) {
-        if (fmt->streams[i]->codecpar->codec_type != AVMEDIA_TYPE_VIDEO)
+        const AVStream* st = fmt->streams[i];
+        if (st->codecpar->codec_type != AVMEDIA_TYPE_VIDEO)
+            continue;
+        // A still picture carried in the file is not a lens: DJI's .OSV keeps
+        // an MJPEG cover (960x540) beside its two HEVC lens tracks, and taking
+        // it would make a two-lens clip look like a three-lens one.
+        if (st->disposition & (AV_DISPOSITION_ATTACHED_PIC | AV_DISPOSITION_TIMED_THUMBNAILS))
+            continue;
+        if (st->codecpar->codec_id == AV_CODEC_ID_MJPEG ||
+            st->codecpar->codec_id == AV_CODEC_ID_PNG)
             continue;
         if (!addLens(0, static_cast<int>(i), setup, err)) {
             close();

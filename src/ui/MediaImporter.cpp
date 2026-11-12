@@ -33,11 +33,20 @@ MediaImporter::MediaImporter(Project *project, MediaPoolPanel *panel, TabSidebar
 
 void MediaImporter::importFiles()
 {
+    // The dialog's glob is case-sensitive on the GTK and Windows file
+    // choosers, while the pool matches a suffix case-insensitively (MediaPool
+    // lowercases it). Cameras disagree on case -- Insta360 writes .insv, DJI
+    // writes .OSV -- so offer both spellings, or the files a camera names in
+    // capitals are hidden from the user by the filter alone.
     QStringList patterns;
     for (const auto kind :
-         {MediaItem::Kind::Clip360, MediaItem::Kind::Video, MediaItem::Kind::Audio})
-        for (const QString &ext : media::extensions(kind))
-            patterns << QStringLiteral("*.") + ext;
+         {MediaItem::Kind::Clip360, MediaItem::Kind::Video, MediaItem::Kind::Audio}) {
+        for (const QString &ext : media::extensions(kind)) {
+            patterns << QStringLiteral("*.") + ext.toLower();
+            if (ext.toUpper() != ext.toLower())
+                patterns << QStringLiteral("*.") + ext.toUpper();
+        }
+    }
     const QStringList paths = QFileDialog::getOpenFileNames(
         m_window, tr("Import files"), m_lastDir.isEmpty() ? QDir::homePath() : m_lastDir,
         tr("Video and audio files (%1);;All files (*)").arg(patterns.join(QLatin1Char(' '))));

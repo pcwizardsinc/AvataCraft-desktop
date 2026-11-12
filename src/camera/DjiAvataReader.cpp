@@ -1,6 +1,7 @@
 #include "DjiAvataReader.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 #include <filesystem>
 #include <string>
@@ -71,12 +72,8 @@ CameraReader::Result DjiAvataReader::read(const std::vector<insv::InsvStreamInfo
     if (lowerExt(out.path) != ".osv")
         return Result::NotMine;
 
-    if (streams.size() < 2) {
-        // A .OSV carries one HEVC track per lens. One stream means either a
-        // single-lens recording (the Avata's Single Lens mode writes .MP4,
-        // not .OSV) or a file we have not understood.
-        err = "the .OSV has " + std::to_string(streams.size()) +
-              " video track(s); a 360 clip has two, one per lens";
+    if (streams.empty()) {
+        err = "the .OSV has no video track";
         return Result::Failed;
     }
 
@@ -89,15 +86,73 @@ CameraReader::Result DjiAvataReader::read(const std::vector<insv::InsvStreamInfo
     if (out.model.empty())
         out.model = "DJI Avata 360";
 
+    // Two layouts are in the wild for a DJI 360 clip, and which one a file
+    // uses depends on the camera and the recording mode:
+    //   * one HEVC track per lens (two video streams), and
+    //   * both lenses in one track, side by side (one stream, 2:1).
+    // The .LRF proxy of a clip is side-by-side even when its .OSV is not, so
+    // handling only the two-track case would refuse half the files.
     out.projection = Projection::DualFisheye;
     out.lenses.resize(2);
-    for (int i = 0; i < 2; ++i)
-        out.lenses[i].source = LensSource{out.path, i};
+    if (streams.size() >= 2) {
+        for (int i = 0; i < 2; ++i)
+            out.lenses[i].source = LensSource{out.path, i};
+    } else {
+        // Side by side in one track: both lenses name the same stream, and the
+        // stitch takes the left and right halves. A lens is then half as wide
+        // as the stream, which the common fields must say.
+        out.lenses[0].source = LensSource{out.path, 0};
+        out.lenses[1].source = LensSource{out.path, 0};
+        out.lensWidth = streams[0].width / 2;
+        out.lensHeight = streams[0].height;
+    }
 
-    // TODO(calibration): fill lenses[i].calibration from DJI's lens boxes and
-    // set calibrated = true. Until then the app falls back to its own model
-    // defaults, as it does for an Insta360 file whose trailer lacks them.
-    out.calibrated = false;
+    // Lens calibration.
+    //
+    // DJI does record the real thing: a DewarpParams record per lens, in the
+    // metadata streams of the .OSV (an Avata 360 writes them in the slot
+    // OpenOSV calls native_refine_far). Reading those is a port of DJI's
+    // metadata decoder and is the next piece of work; see the project notes.
+    //
+    // Until then, stand in a calibration derived from the camera's published
+    // geometry, so a clip stitches and can be judged by eye instead of being
+    // refused outright. It is deliberately approximate, and says so:
+    //
+    //   * The Avata 360 calibrates in a 3840x3840 frame whose fisheye circle
+    //     is 3776 px across, so the circle fills 0.9833 of the frame whatever
+    //     the stream is scaled to.
+    //   * Modelled as stereographic (MEI with xi = 1, no polynomial), where
+    //     r = f * tan(theta / 2). With a 190 deg lens the rim sits at
+    //     theta = 95 deg, so f = (circle / 2) / tan(47.5 deg).
+    //
+    // Expect visible seam error: a real lens is not exactly stereographic and
+    // its principal point is not exactly centred. This is a stopgap that
+    // makes the picture visible, not a substitute for the file's own numbers.
+    {
+        constexpr double kCircleFraction = 3776.0 / 3840.0; // circle / frame
+        constexpr double kHalfFovDeg = 95.0;                // 190 deg lens
+        const double side = static_cast<double>(out.lensWidth);
+        const double circle = side * kCircleFraction;
+        const double halfFovRad = kHalfFovDeg * 3.14159265358979323846 / 180.0;
+        const double f = (circle / 2.0) / std::tan(halfFovRad / 2.0);
+
+        for (int i = 0; i < 2; ++i) {
+            insv::LensCalibExt& c = out.lenses[i].calibration;
+            c.xi = 1.0; // stereographic
+            c.fx = c.fy = f;
+            c.cx = side / 2.0;
+            c.cy = static_cast<double>(out.lensHeight) / 2.0;
+            c.w = side;
+            c.h = static_cast<double>(out.lensHeight);
+            // The two lenses look opposite ways; lens 1 is the far side.
+            c.yaw = (i == 0) ? 0.0 : 180.0;
+            c.pitch = c.roll = 0.0;
+            // fx/fy are given in the stream's own pixels here, so the sensor
+            // window they refer to is the stream width.
+            c.focalRefW = side;
+        }
+    }
+    out.calibrated = true;
 
     const Mount mount = mountFor(out.model);
     out.mountYawDeg = mount.yawDeg;
