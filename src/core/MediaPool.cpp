@@ -7,8 +7,9 @@ namespace media {
 
 const QStringList &extensions(MediaItem::Kind kind)
 {
-    // 360 clips: the master, not the .lrv proxy.
-    static const QStringList clip360 = {QStringLiteral("insv")};
+    // 360 clips: the master, not the .lrv / .LRF proxy.
+    //   insv = Insta360 (X3/X4/X5), osv = DJI Osmo 360 / Avata 360.
+    static const QStringList clip360 = {QStringLiteral("insv"), QStringLiteral("osv")};
     static const QStringList video = {QStringLiteral("mp4"), QStringLiteral("mov"),
                                       QStringLiteral("mkv"), QStringLiteral("m4v"),
                                       QStringLiteral("webm"), QStringLiteral("avi")};

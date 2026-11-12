@@ -1,5 +1,6 @@
 #include "ClipMetadata.h"
 
+#include "DjiAvataReader.h"
 #include "Insta360Reader.h"
 
 #include <LensDemuxer.h>
@@ -17,7 +18,8 @@ namespace {
 // Asked in turn; the first that knows the file reads it.
 const std::vector<const CameraReader*>& readers() {
     static const Insta360Reader insta360;
-    static const std::vector<const CameraReader*> all = {&insta360};
+    static const DjiAvataReader djiAvata;
+    static const std::vector<const CameraReader*> all = {&insta360, &djiAvata};
     return all;
 }
 

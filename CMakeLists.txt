@@ -474,6 +474,8 @@ if(FFMPEG_FOUND)
         src/camera/ClipMetadata.cpp
         src/camera/CameraReader.h
         src/camera/Insta360Reader.h
+        src/camera/DjiAvataReader.cpp
+        src/camera/DjiAvataReader.h
         src/camera/Insta360Reader.cpp
         src/camera/MediaInfo.h
         src/camera/MediaInfo.cpp
