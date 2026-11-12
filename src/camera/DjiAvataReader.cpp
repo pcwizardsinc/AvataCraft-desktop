@@ -136,19 +136,27 @@ CameraReader::Result DjiAvataReader::read(const std::vector<insv::InsvStreamInfo
         const double halfFovRad = kHalfFovDeg * 3.14159265358979323846 / 180.0;
         const double f = (circle / 2.0) / std::tan(halfFovRad / 2.0);
 
+        // cx/cy are given in the SIDE-BY-SIDE combined frame, not in one
+        // lens: FisheyeProjection takes halfW = w / 2 and subtracts it for
+        // lens 1 (and scales by streamW / halfW). So w is both lenses wide.
+        const double combinedW = side * 2.0;
+        const double height = static_cast<double>(out.lensHeight);
         for (int i = 0; i < 2; ++i) {
             insv::LensCalibExt& c = out.lenses[i].calibration;
             c.xi = 1.0; // stereographic
             c.fx = c.fy = f;
-            c.cx = side / 2.0;
-            c.cy = static_cast<double>(out.lensHeight) / 2.0;
-            c.w = side;
-            c.h = static_cast<double>(out.lensHeight);
-            // The two lenses look opposite ways; lens 1 is the far side.
-            c.yaw = (i == 0) ? 0.0 : 180.0;
-            c.pitch = c.roll = 0.0;
-            // fx/fy are given in the stream's own pixels here, so the sensor
-            // window they refer to is the stream width.
+            c.cx = (i == 0) ? side / 2.0 : side + side / 2.0;
+            c.cy = height / 2.0;
+            c.w = combinedW;
+            c.h = height;
+            // yaw/pitch/roll here are the CORRECTION to the lens's nominal
+            // pose, not the pose itself: FisheyeProjection already turns lens
+            // 1 by nominalYaw1Deg (180 deg) to face the other way. Setting
+            // 180 here too turned it back, so both lenses covered the same
+            // hemisphere and half the sphere came out black.
+            c.yaw = c.pitch = c.roll = 0.0;
+            // The sensor window fx/fy are given in: one lens wide, since f
+            // above is computed in this stream's own pixels.
             c.focalRefW = side;
         }
     }
