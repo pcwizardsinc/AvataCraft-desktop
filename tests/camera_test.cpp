@@ -7,16 +7,21 @@
 // found again by the names its files hold. Exit code is the failure count.
 
 #include "ClipMetadata.h"
+#include "DjiDewarp.h"
+#include "DjiProto.h"
+#include "DjiSrt.h"
 #include "InsvTrailer.h"
 #include "support/TestMedia.h"
 #include "support/TestTrailer.h"
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <numbers>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -485,6 +490,133 @@ void testA1Renamed(const std::filesystem::path& dir)
 
 } // namespace
 
+
+// DJI's per-frame .srt telemetry: the flight path and the colour mode, with
+// the quirks real files have -- a 0/0 position before the aircraft has a fix,
+// the same position repeated for every frame at 100 fps, rel_alt vs abs_alt.
+static void testDjiSrt(const std::filesystem::path& dir)
+{
+    const std::filesystem::path srt = dir / "DJI_0001_D.SRT";
+    {
+        std::ofstream f(srt);
+        f << "1\n00:00:00,000 --> 00:00:00,010\n"
+             "<font size=\"28\">FrameCnt: 1, DiffTime: 10ms, FrameId: 10393\n"
+             "2026-10-18 15:37:03.449\n"
+             "[iso: 200] [shutter: 1/3200.0] [fnum: 1.9] [ev: 0.3] [ct: 5429] "
+             "[color_md: dlog_m] [ae_meter_md: 0] [latitude: 0.000000] "
+             "[longitude: 0.000000] [rel_alt: 0.000 abs_alt: 0.000] </font>\n\n"
+             "2\n00:00:00,010 --> 00:00:00,030\n"
+             "<font size=\"28\">[iso: 200] [ct: 5430] [color_md: dlog_m] "
+             "[latitude: 47.086130] [longitude: -122.313311] "
+             "[rel_alt: 2.200 abs_alt: 121.834] </font>\n\n"
+             "3\n00:00:00,030 --> 00:00:00,050\n"
+             "<font size=\"28\">[latitude: 47.086130] [longitude: -122.313311] "
+             "[rel_alt: 2.200 abs_alt: 121.834] </font>\n\n"
+             "4\n00:01:05,250 --> 00:01:05,260\n"
+             "<font size=\"28\">[latitude: 47.200000] [longitude: -122.300000] "
+             "[abs_alt: 99.900] </font>\n";
+    }
+    const auto info = camera::ReadDjiSrt(srt.string());
+    CHECK(info.has_value());
+    if (!info)
+        return;
+    CHECK(info->colourMode == "dlog_m");
+    CHECK(info->iso == 200);
+    CHECK(std::fabs(info->colourTempK - 5429.0) < 0.5);
+    // The 0/0 entry is not a position; the repeat is not a second fix.
+    CHECK(info->gps.fixes.size() == 2);
+    if (info->gps.fixes.size() == 2) {
+        CHECK(info->gps.fixes[0].timeMs == 10);
+        CHECK(std::fabs(info->gps.fixes[0].latitude - 47.086130) < 1e-6);
+        CHECK(std::fabs(info->gps.fixes[0].altitudeM - 121.834) < 1e-3); // abs, not rel
+        CHECK(info->gps.fixes[1].timeMs == 65250);                       // past a minute
+    }
+    // Not an .srt at all, and a missing file: no crash, no value.
+    const std::filesystem::path bad = dir / "bad.SRT";
+    { std::ofstream f(bad); f << "not an srt\n"; }
+    CHECK(!camera::ReadDjiSrt(bad.string()).has_value());
+    CHECK(!camera::ReadDjiSrt((dir / "nope.SRT").string()).has_value());
+    // The clip -> .srt mapping finds a file beside the clip.
+    const std::filesystem::path clip = dir / "DJI_0001_D.OSV";
+    { std::ofstream f(clip); f << "x"; }
+    CHECK(camera::DjiSrtPathFor(clip.string()) == srt.string());
+}
+
+
+// DJI's protobuf lens records (DewarpParams) out of the .OSV metadata tracks.
+// Built here rather than read from a file so the test needs no footage.
+static void testDjiDewarp()
+{
+    namespace pr = camera::proto;
+    const auto varint = [](std::vector<std::uint8_t>& b, std::uint64_t v) {
+        while (v >= 0x80) { b.push_back(static_cast<std::uint8_t>(v) | 0x80); v >>= 7; }
+        b.push_back(static_cast<std::uint8_t>(v));
+    };
+    const auto tag = [&](std::vector<std::uint8_t>& b, std::uint32_t n, pr::Wire w) {
+        varint(b, (static_cast<std::uint64_t>(n) << 3) | static_cast<std::uint64_t>(w));
+    };
+    const auto f32 = [&](std::vector<std::uint8_t>& b, std::uint32_t n, float v) {
+        tag(b, n, pr::Wire::Fixed32);
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &v, sizeof bits);
+        for (int i = 0; i < 4; ++i) b.push_back(static_cast<std::uint8_t>(bits >> (8 * i)));
+    };
+    // An Avata-shaped record: 3840x3840 calibration frame, fisheye focal,
+    // width written as a varint and height as a float (both occur in the wild).
+    const auto lens = [&](float cx, float yaw) {
+        std::vector<std::uint8_t> m;
+        f32(m, 1, 1180.0f); f32(m, 2, 1180.0f);
+        f32(m, 3, cx);      f32(m, 4, 1920.0f);
+        f32(m, 9, 0.0f);    f32(m, 5, -0.03f);
+        tag(m, 10, pr::Wire::Varint); varint(m, 3840);
+        f32(m, 11, 3840.0f);
+        f32(m, 12, yaw); f32(m, 13, 0.5f); f32(m, 14, -0.2f);
+        return m;
+    };
+
+    const auto a = lens(1920.0f, 0.0f);
+    const camera::DewarpParams d = camera::DecodeDewarp(a);
+    CHECK(d.hasCore());
+    CHECK(d.fx && std::fabs(*d.fx - 1180.0f) < 1e-3);
+    CHECK(d.width && std::fabs(*d.width - 3840.0f) < 1e-3);   // varint dimension
+    CHECK(d.height && std::fabs(*d.height - 3840.0f) < 1e-3);
+    CHECK(d.pitch && std::fabs(*d.pitch - 0.5f) < 1e-3);
+    CHECK(d.k[0] && std::fabs(*d.k[0] + 0.03f) < 1e-3);
+
+    // Two lenses nested in a container, the shape DJI writes.
+    const auto b = lens(1921.0f, 180.0f);
+    std::vector<std::uint8_t> outer;
+    tag(outer, 3, pr::Wire::LengthDelimited); varint(outer, a.size());
+    outer.insert(outer.end(), a.begin(), a.end());
+    tag(outer, 4, pr::Wire::LengthDelimited); varint(outer, b.size());
+    outer.insert(outer.end(), b.begin(), b.end());
+    const auto found = camera::FindDewarpRecords(outer);
+    CHECK(found.size() >= 2);
+    if (found.size() >= 2) {
+        CHECK(std::fabs(*found[0].cx - 1920.0f) < 1e-3);
+        CHECK(std::fabs(*found[1].cx - 1921.0f) < 1e-3);
+    }
+
+    // A placeholder slot (the Avata leaves its primary pair empty) is not a lens.
+    std::vector<std::uint8_t> placeholder;
+    f32(placeholder, 9, 0.0f);
+    CHECK(!camera::DecodeDewarp(placeholder).hasCore());
+    CHECK(camera::FindDewarpRecords(placeholder).empty());
+
+    // Same field numbers, impossible values: rejected rather than believed.
+    std::vector<std::uint8_t> bogus;
+    f32(bogus, 1, 9e9f); f32(bogus, 2, 9e9f);
+    f32(bogus, 3, 5.0f); f32(bogus, 4, 5.0f);
+    f32(bogus, 10, 10.0f); f32(bogus, 11, 10.0f);
+    CHECK(camera::FindDewarpRecords(bogus).empty());
+
+    // Corrupt input must neither crash nor loop: every truncation, and junk.
+    for (std::size_t cut = 1; cut < outer.size(); ++cut)
+        camera::FindDewarpRecords(std::span<const std::uint8_t>(outer.data(), cut));
+    const std::vector<std::uint8_t> junk(256, 0xAB);
+    camera::FindDewarpRecords(junk);
+}
+
 int main()
 {
     const auto dir = std::filesystem::temp_directory_path() / "orbis_camera_test";
@@ -497,6 +629,8 @@ int main()
     testClipFileOf(t);
     testStitchedThumbnail(t);
     testGps(dir);
+    testDjiSrt(dir);
+    testDjiDewarp();
     testHighlights(dir);
     testAntigravityA1(dir);
     testA1Renamed(dir);

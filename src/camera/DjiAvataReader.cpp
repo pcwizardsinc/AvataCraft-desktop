@@ -1,5 +1,7 @@
 #include "DjiAvataReader.h"
 
+#include "DjiSrt.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cctype>
@@ -167,11 +169,22 @@ CameraReader::Result DjiAvataReader::read(const std::vector<insv::InsvStreamInfo
     out.mountPitchDeg = mount.pitchDeg;
     out.mountRollDeg = mount.rollDeg;
 
-    // The Avata records D-Log M; a clip shot in it looks flat until the
-    // profile is applied. DJI's own name for the curve is "D-Log M".
-    // TODO(metadata): read the real colour mode (Normal vs D-Log M) from the
-    // metadata rather than assuming; the box exists, we just don't parse it.
-    out.logProfile = "D-Log M";
+    // Colour mode. The .srt beside the clip records what the camera actually
+    // shot in (`color_md: dlog_m`), so a Normal-colour clip is no longer
+    // mislabelled as log and sent looking for a LUT it does not need.
+    out.logProfile.clear();
+    if (const std::string srt = DjiSrtPathFor(out.path); !srt.empty()) {
+        if (const auto info = ReadDjiSrt(srt)) {
+            if (info->colourMode.find("dlog") != std::string::npos ||
+                info->colourMode.find("d-log") != std::string::npos)
+                out.logProfile = "D-Log M";
+        }
+    }
+    if (out.logProfile.empty() && out.model.find("Avata") != std::string::npos) {
+        // No .srt beside the clip: the Avata's own default is D-Log M, and
+        // calling a log clip "normal" looks far worse than the reverse.
+        out.logProfile = "D-Log M";
+    }
 
     const std::string proxy = proxyBeside(out.path);
     if (!proxy.empty())
@@ -190,10 +203,16 @@ std::optional<insv::ImuTrack> DjiAvataReader::readImu(const ClipMetadata& clip) 
 }
 
 std::optional<insv::GpsTrack> DjiAvataReader::readGps(const ClipMetadata& clip) const {
-    // TODO(gps): the aircraft's GPS is in the .SRT beside the clip (and in the
-    // metadata boxes). Not read yet.
-    (void)clip;
-    return std::nullopt;
+    // The aircraft's flight path, from the .srt DJI writes beside the clip.
+    // (The metadata tracks carry it too, but the .srt is plain text and is
+    // there for every clip.)
+    const std::string srt = DjiSrtPathFor(clip.path);
+    if (srt.empty())
+        return std::nullopt;
+    const auto info = ReadDjiSrt(srt);
+    if (!info || info->gps.fixes.empty())
+        return std::nullopt;
+    return info->gps;
 }
 
 std::optional<std::string> DjiAvataReader::clipFileFor(const std::string& path) const {
