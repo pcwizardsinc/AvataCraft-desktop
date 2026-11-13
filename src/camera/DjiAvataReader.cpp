@@ -1,12 +1,19 @@
 #include "DjiAvataReader.h"
 
+#include "DjiDewarp.h"
+#include "DjiLensFit.h"
+#include "DjiMetaTrack.h"
 #include "DjiSrt.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdio>
 #include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 // DJI .OSV support. This first stage identifies the file, describes the take
 // (model, lenses, proxy, colour profile) and sets the mount the Avata needs;
@@ -111,58 +118,168 @@ CameraReader::Result DjiAvataReader::read(const std::vector<insv::InsvStreamInfo
 
     // Lens calibration.
     //
-    // DJI does record the real thing: a DewarpParams record per lens, in the
-    // metadata streams of the .OSV (an Avata 360 writes them in the slot
-    // OpenOSV calls native_refine_far). Reading those is a port of DJI's
-    // metadata decoder and is the next piece of work; see the project notes.
+    // DJI records the real thing -- a DewarpParams record per lens -- in the
+    // `djmd` metadata tracks. Read those when they are there, and fall back
+    // to a geometric approximation when they are not, so an unreadable or
+    // unfamiliar file still stitches (badly) rather than refusing to open.
     //
-    // Until then, stand in a calibration derived from the camera's published
-    // geometry, so a clip stitches and can be judged by eye instead of being
-    // refused outright. It is deliberately approximate, and says so:
-    //
-    //   * The Avata 360 calibrates in a 3840x3840 frame whose fisheye circle
-    //     is 3776 px across, so the circle fills 0.9833 of the frame whatever
-    //     the stream is scaled to.
-    //   * Modelled as stereographic (MEI with xi = 1, no polynomial), where
-    //     r = f * tan(theta / 2). With a 190 deg lens the rim sits at
-    //     theta = 95 deg, so f = (circle / 2) / tan(47.5 deg).
-    //
-    // Expect visible seam error: a real lens is not exactly stereographic and
-    // its principal point is not exactly centred. This is a stopgap that
-    // makes the picture visible, not a substitute for the file's own numbers.
+    // The proxy beside the clip carries the same tracks and is a fraction of
+    // the size (142 MB against 2.4 GB on the test clip), so read it by
+    // preference: the calibration frame is the camera's own either way.
+    out.calibrated = false;
     {
-        constexpr double kCircleFraction = 3776.0 / 3840.0; // circle / frame
-        constexpr double kHalfFovDeg = 95.0;                // 190 deg lens
         const double side = static_cast<double>(out.lensWidth);
-        const double circle = side * kCircleFraction;
-        const double halfFovRad = kHalfFovDeg * 3.14159265358979323846 / 180.0;
-        const double f = (circle / 2.0) / std::tan(halfFovRad / 2.0);
-
-        // cx/cy are given in the SIDE-BY-SIDE combined frame, not in one
-        // lens: FisheyeProjection takes halfW = w / 2 and subtracts it for
-        // lens 1 (and scales by streamW / halfW). So w is both lenses wide.
-        const double combinedW = side * 2.0;
         const double height = static_cast<double>(out.lensHeight);
-        for (int i = 0; i < 2; ++i) {
-            insv::LensCalibExt& c = out.lenses[i].calibration;
-            c.xi = 1.0; // stereographic
-            c.fx = c.fy = f;
-            c.cx = (i == 0) ? side / 2.0 : side + side / 2.0;
-            c.cy = height / 2.0;
-            c.w = combinedW;
-            c.h = height;
-            // yaw/pitch/roll here are the CORRECTION to the lens's nominal
-            // pose, not the pose itself: FisheyeProjection already turns lens
-            // 1 by nominalYaw1Deg (180 deg) to face the other way. Setting
-            // 180 here too turned it back, so both lenses covered the same
-            // hemisphere and half the sphere came out black.
-            c.yaw = c.pitch = c.roll = 0.0;
-            // The sensor window fx/fy are given in: one lens wide, since f
-            // above is computed in this stream's own pixels.
-            c.focalRefW = side;
+        const double combinedW = side * 2.0;
+
+        // Diagnostics, both read once here:
+        //   AVATA_CALIB=approx   ignore the file's records, use the stand-in
+        //   AVATA_SWAP_LENSES=1  feed stream 1 to lens 0 and stream 0 to lens 1
+        // Swapping does not soften a seam, it turns the whole sphere round, so
+        // it is a yes/no check on a clip that looks mirrored, in either path.
+        const auto envOn = [](const char* name) {
+            const char* v = std::getenv(name);
+            return v && *v && *v != '0';
+        };
+        const bool forceApprox = [] {
+            const char* v = std::getenv("AVATA_CALIB");
+            return v && std::string(v) == "approx";
+        }();
+        const bool swapLenses = envOn("AVATA_SWAP_LENSES");
+        // The stitcher subtracts a fixed sensor clock of 90 deg from every
+        // lens's roll (StitchParams::tzNominalDeg, because Insta360's X5 writes
+        // roll ~90 for both lenses). A lens handed roll = 0 is therefore rolled
+        // -90 deg about its own axis, and since the two lenses face opposite
+        // ways that twists the hemispheres 180 deg against each other: a
+        // house ends up where the lawn across the street should be. Writing
+        // 90 cancels it. AVATA_LENS_ROLL=<deg> overrides for experiments.
+        const double lensRollDeg = [] {
+            const char* v = std::getenv("AVATA_LENS_ROLL");
+            return v && *v ? std::atof(v) : 90.0;
+        }();
+
+        std::vector<DewarpParams> lenses;
+        if (!forceApprox) {
+            const std::string proxy = proxyBeside(out.path);
+            for (const std::string& from : {proxy, out.path}) {
+                for (const auto& sample : ReadDjiMetaSamples(from)) {
+                    for (DewarpParams& d : FindDewarpRecords(sample)) {
+                        lenses.push_back(std::move(d));
+                        if (lenses.size() >= 2)
+                            break;
+                    }
+                    if (lenses.size() >= 2)
+                        break;
+                }
+                if (lenses.size() >= 2)
+                    break;
+            }
+        }
+
+        if (lenses.size() >= 2) {
+            // Record order is file order, which DJI writes as slot 3 then
+            // slot 4 (native_refine_far slave, then master), and OpenOSV ties
+            // slot 3 to video stream 0 and slot 4 to stream 1. So the first
+            // record is lens 0 and the second is lens 1; nothing is reordered
+            // by the angles it carries.
+            constexpr double kHalfFovRad = 95.0 * 3.14159265358979323846 / 180.0;
+            for (int i = 0; i < 2; ++i) {
+                const DewarpParams& d = lenses[static_cast<std::size_t>(i)];
+                insv::LensCalibExt& c = out.lenses[i].calibration;
+
+                // DJI calibrates in its own frame (3840x3840 on the Avata); the
+                // stream here may be 1920x1920. Everything in pixels scales.
+                const double sx = side / static_cast<double>(*d.width);
+                const double sy = height / static_cast<double>(*d.height);
+
+                // DJI's record is Kannala-Brandt; LensCalibExt is MEI. The
+                // numbers are converted, not copied -- see DjiLensFit.h.
+                std::array<double, 5> kb{};
+                for (std::size_t t = 0; t < kb.size() && t < d.k.size(); ++t)
+                    kb[t] = d.k[t] ? static_cast<double>(*d.k[t]) : 0.0;
+                const double fKbX = static_cast<double>(*d.fx) * sx;
+                const double fKbY = static_cast<double>(*d.fy) * sy;
+                const MeiLens mei = FitMeiToKannalaBrandt(fKbX, kb, kHalfFovRad);
+
+                c.xi = mei.xi;
+                c.fx = mei.f;
+                c.fy = mei.f * (fKbY / fKbX); // keep DJI's fy/fx ratio
+                c.cx = static_cast<double>(*d.cx) * sx + (i == 0 ? 0.0 : side);
+                c.cy = static_cast<double>(*d.cy) * sy;
+                for (std::size_t t = 0; t < 4; ++t)
+                    c.k[t] = mei.k[t];
+                // DJI's tangential terms belong to its model, not to MEI's
+                // normalised coordinates; they are tiny on a 360 lens and are
+                // left out rather than applied in the wrong frame.
+                c.p[0] = c.p[1] = 0.0;
+                c.w = combinedW;
+                c.h = height;
+                // DJI's yaw/pitch/roll are the lens's pose in the camera body
+                // (on the Avata the lenses look up and down the body's Y axis),
+                // not a small correction to orbis's nominal front/back pair.
+                // Applying them here as corrections is wrong by construction.
+                // The mount (mountFor) and the nominal pair carry the pose for
+                // now; the angles are logged below so they can be read. On the
+                // DangTree clip they are within 0.9 deg of the nominal poses
+                // (lens 0 ypr -179.1/90.1/0.3, lens 1 -0.1/90.1/0.9), so what
+                // is left out here is sub-degree seam error, not geometry.
+                c.yaw = c.pitch = 0.0;
+                c.roll = lensRollDeg;
+                c.focalRefW = side;
+
+                std::fprintf(stderr,
+                    "[DjiAvataReader] lens %d from file: KB fx=%.2f fy=%.2f cx=%.2f cy=%.2f frame=%.0fx%.0f"
+                    " k=[%.5g %.5g %.5g %.5g %.5g] ypr=[%.3f %.3f %.3f] xi=%.3g"
+                    " -> MEI xi=1 f=%.2f K=[%.5g %.5g %.5g %.5g] fit err %.3f px (stream %dx%d)\n",
+                    i, static_cast<double>(*d.fx), static_cast<double>(*d.fy),
+                    static_cast<double>(*d.cx), static_cast<double>(*d.cy),
+                    static_cast<double>(*d.width), static_cast<double>(*d.height),
+                    kb[0], kb[1], kb[2], kb[3], kb[4],
+                    d.yaw ? static_cast<double>(*d.yaw) : 0.0,
+                    d.pitch ? static_cast<double>(*d.pitch) : 0.0,
+                    d.roll ? static_cast<double>(*d.roll) : 0.0,
+                    d.xi ? static_cast<double>(*d.xi) : 0.0,
+                    mei.f, mei.k[0], mei.k[1], mei.k[2], mei.k[3], mei.maxErr,
+                    out.lensWidth, out.lensHeight);
+            }
+            out.calibrated = true;
+        } else {
+            // No usable records (or AVATA_CALIB=approx): stand in the camera's
+            // published geometry. The Avata 360 calibrates in a 3840x3840
+            // frame whose fisheye circle is 3776 px across, modelled as
+            // stereographic (MEI with xi = 1), where r = f * tan(theta / 2)
+            // and a 190 deg lens puts the rim at theta = 95 deg. Expect
+            // visible seam error: a real lens is not exactly stereographic and
+            // is not exactly centred.
+            constexpr double kCircleFraction = 3776.0 / 3840.0;
+            constexpr double kHalfFovDeg = 95.0;
+            const double circle = side * kCircleFraction;
+            const double halfFovRad = kHalfFovDeg * 3.14159265358979323846 / 180.0;
+            const double f = (circle / 2.0) / std::tan(halfFovRad / 2.0);
+            for (int i = 0; i < 2; ++i) {
+                insv::LensCalibExt& c = out.lenses[i].calibration;
+                c.xi = 1.0;
+                c.fx = c.fy = f;
+                c.cx = (i == 0) ? side / 2.0 : side + side / 2.0;
+                c.cy = height / 2.0;
+                c.w = combinedW;
+                c.h = height;
+                c.yaw = c.pitch = 0.0;
+                c.roll = lensRollDeg;
+                c.focalRefW = side;
+            }
+            std::fprintf(stderr, "[DjiAvataReader] %s; using the stereographic stand-in\n",
+                         forceApprox ? "AVATA_CALIB=approx" : "no usable DewarpParams in the file");
+            out.calibrated = true; // approximate, but usable
+        }
+        std::fprintf(stderr, "[DjiAvataReader] lens roll written as %.1f deg (stitcher clock is 90)\n", lensRollDeg);
+
+        if (swapLenses && out.lenses[0].source.stream != out.lenses[1].source.stream) {
+            std::swap(out.lenses[0].source, out.lenses[1].source);
+            std::fprintf(stderr, "[DjiAvataReader] AVATA_SWAP_LENSES=1: lens 0 <- stream %d, lens 1 <- stream %d\n",
+                         out.lenses[0].source.stream, out.lenses[1].source.stream);
         }
     }
-    out.calibrated = true;
 
     const Mount mount = mountFor(out.model);
     out.mountYawDeg = mount.yawDeg;

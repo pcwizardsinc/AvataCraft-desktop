@@ -476,6 +476,10 @@ if(FFMPEG_FOUND)
         src/camera/Insta360Reader.h
         src/camera/DjiAvataReader.cpp
         src/camera/DjiDewarp.cpp
+        src/camera/DjiLensFit.cpp
+        src/camera/DjiLensFit.h
+        src/camera/DjiMetaTrack.cpp
+        src/camera/DjiMetaTrack.h
         src/camera/DjiDewarp.h
         src/camera/DjiProto.h
         src/camera/DjiSrt.cpp

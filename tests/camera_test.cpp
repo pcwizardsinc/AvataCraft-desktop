@@ -8,6 +8,7 @@
 
 #include "ClipMetadata.h"
 #include "DjiDewarp.h"
+#include "DjiLensFit.h"
 #include "DjiProto.h"
 #include "DjiSrt.h"
 #include "InsvTrailer.h"
@@ -612,9 +613,43 @@ static void testDjiDewarp()
 
     // Corrupt input must neither crash nor loop: every truncation, and junk.
     for (std::size_t cut = 1; cut < outer.size(); ++cut)
-        camera::FindDewarpRecords(std::span<const std::uint8_t>(outer.data(), cut));
+        (void)camera::FindDewarpRecords(std::span<const std::uint8_t>(outer.data(), cut));
     const std::vector<std::uint8_t> junk(256, 0xAB);
-    camera::FindDewarpRecords(junk);
+    (void)camera::FindDewarpRecords(junk);
+}
+
+void testDjiLensFit()
+{
+    // A Kannala-Brandt lens shaped like a 190 deg fisheye in a 1920 px frame
+    // must come out of the conversion as a MEI lens whose radius agrees with
+    // it to well under a pixel from the axis to the rim. This is what makes
+    // the file's own calibration usable in orbis-reframe's stitcher at all.
+    const double rim = 95.0 * std::numbers::pi / 180.0;
+    const std::array<double, 5> kb{-0.04, 0.003, -0.0005, 0.0, 0.0};
+    const double fKb = 944.0 / camera::KannalaBrandtRadius(1.0, kb, rim);
+    const camera::MeiLens m = camera::FitMeiToKannalaBrandt(fKb, kb, rim);
+    CHECK(m.xi == 1.0);
+    CHECK(m.f > 1.9 * fKb && m.f < 2.1 * fKb); // slope match on the axis
+    CHECK(m.maxErr < 0.5);
+    for (int deg = 1; deg <= 95; deg += 2) {
+        const double th = deg * std::numbers::pi / 180.0;
+        CHECK(std::fabs(camera::MeiRadius(m, th) - camera::KannalaBrandtRadius(fKb, kb, th)) < 0.5);
+    }
+    // Monotonic to the rim: the stitcher rejects a lens that folds back.
+    double last = 0.0;
+    for (int deg = 1; deg <= 95; ++deg) {
+        const double r = camera::MeiRadius(m, deg * std::numbers::pi / 180.0);
+        CHECK(r > last);
+        last = r;
+    }
+    // The plain equidistant lens (all k = 0) is the textbook case.
+    const camera::MeiLens e = camera::FitMeiToKannalaBrandt(600.0, {}, rim);
+    CHECK(e.maxErr < 0.25);
+    // Degenerate input yields something finite rather than a crash or NaN.
+    const camera::MeiLens bad = camera::FitMeiToKannalaBrandt(-1.0, {}, rim);
+    CHECK(std::isfinite(bad.f) && std::isfinite(bad.k[0]));
+    const camera::MeiLens nan = camera::FitMeiToKannalaBrandt(600.0, {std::nan(""), 0, 0, 0, 0}, rim);
+    CHECK(std::isfinite(nan.f) && nan.k[0] == 0.0);
 }
 
 int main()
@@ -631,6 +666,7 @@ int main()
     testGps(dir);
     testDjiSrt(dir);
     testDjiDewarp();
+    testDjiLensFit();
     testHighlights(dir);
     testAntigravityA1(dir);
     testA1Renamed(dir);

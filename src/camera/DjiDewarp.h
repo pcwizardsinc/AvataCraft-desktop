@@ -9,14 +9,18 @@
 // DJI's per-lens calibration record, as written in the `djmd` metadata tracks
 // of an .OSV.
 //
-// The model is the unified (Mei) projection with a radial polynomial:
+// The model is Kannala-Brandt (the same one OpenOSV's KannalaBrandt5 reads
+// these records into):
 //
-//     r(theta) = [ sin(theta) / (cos(theta) + xi) ] * poly(theta)
+//     r(theta) = f * theta * (1 + k1 theta^2 + k2 theta^4 + ... )
 //
-// which is the same family orbis-reframe's LensCalibExt uses, so the mapping
-// across is direct. What differs is only that DJI records nine radial terms
-// where LensCalibExt keeps four, and that DJI calibrates in its own frame
-// (3840x3840 on the Avata 360) rather than the stream's.
+// It is NOT orbis-reframe's unified (MEI) model, even though the record has an
+// `xi` field: DJI writes xi = 0 because the model has no such term, and the
+// radial polynomial multiplies the angle, not a normalised radius. The two
+// families cannot be mapped field for field; DjiLensFit.h converts one into
+// the other. (An earlier version of this comment claimed the families were the
+// same; acting on that rendered a black preview.) DJI also calibrates in its
+// own frame (3840x3840 on the Avata 360) rather than the stream's.
 //
 // Field numbers are DJI's and are not guessed: they match OpenOSV's decoder,
 // which was derived from real files.
