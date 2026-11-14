@@ -152,8 +152,22 @@ exist so a wrong guess can be checked on footage without rebuilding.
 6. VA-API decode for AMD.
 7. Upstream: once the reader is stable, offer it to orbis-reframe as a pull request, and the Avata mount to OpenOSV.
 
-## Related repositories
+## Where the earlier work went
 
-- [`pcwizardsinc/DJIStudioCraft`](https://github.com/pcwizardsinc/DJIStudioCraft) — earlier OpenOSV-based work; holds the Avata levelling fix and Fedora build fixes.
-- [`pcwizardsinc/AvataCraft`](https://github.com/pcwizardsinc/AvataCraft) — a React/TypeScript browser mock-up of the intended interface (design reference only; its sample `.OSV` is synthetic).
-- [`Kemerd/OpenOSV`](https://github.com/Kemerd/OpenOSV) — the open `.OSV` reader whose protobuf schema, slot selection and attitude conventions this fork's decoders follow.
+The two repositories this grew out of were folded into [`reference/`](reference/README.md)
+in November 2026 and deleted on GitHub:
+
+- **DJIStudioCraft** (OpenOSV-based) — our seven commits are kept as a patch
+  series: the Avata levelling fix, the Fedora build, VA-API decode, and the
+  build guide, roadmap and UI notes.
+- **AvataCraft** (the Gemini browser mock-up) — its React source is kept as a
+  design reference; its synthetic footage and bundled tarball are not.
+
+The planning documents from that period are in `docs/`:
+[`INTERFACE-SPEC.md`](docs/INTERFACE-SPEC.md) (the target UI, from DJI Studio
+screenshots) and [`METADATA-PORT-PLAN.md`](docs/METADATA-PORT-PLAN.md)
+(historical: the plan for the port, with notes on where it was wrong).
+
+[`Kemerd/OpenOSV`](https://github.com/Kemerd/OpenOSV) remains the open `.OSV`
+reader whose protobuf schema, slot selection and attitude conventions this
+fork's decoders follow.

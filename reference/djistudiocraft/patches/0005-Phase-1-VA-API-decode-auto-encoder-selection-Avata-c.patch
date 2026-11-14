@@ -1,0 +1,565 @@
+From 54ff10994996ff9391f1c0555e7aaa3b98b1d4c7 Mon Sep 17 00:00:00 2001
+From: Andrew Chadick <andrew@chadick.org>
+Date: Wed, 11 Nov 2026 11:33:33 -0800
+Subject: [PATCH 5/7] Phase 1: VA-API decode, auto encoder selection, Avata
+ colour default, Rusticl auto-enable
+
+---
+ avata360/ROADMAP.md                      |  21 ++--
+ include/osv/io/FfmpegPipe.h              |   8 ++
+ include/osv/video/HwAccel.h              |   8 +-
+ plugins/importer/ImporterInstance.cpp    |  28 ++++-
+ src/osv/io/FfmpegPipe.cpp                | 143 +++++++++++++++++++++++
+ src/osv/render/opencl/OpenClRenderer.cpp |  29 +++++
+ src/osv/video/Decoder.cpp                |  12 ++
+ tools/osvtool/CmdDecodeReplay.cpp        |   2 +-
+ tools/osvtool/CmdExtract.cpp             |   2 +-
+ tools/osvtool/CmdRender.cpp              |  28 ++++-
+ tools/osvtool/Pipeline.cpp               |   5 +-
+ 11 files changed, 265 insertions(+), 21 deletions(-)
+
+diff --git a/avata360/ROADMAP.md b/avata360/ROADMAP.md
+index d05f5c8..97a7f6d 100644
+--- a/avata360/ROADMAP.md
++++ b/avata360/ROADMAP.md
+@@ -64,8 +64,8 @@ Rules that follow from this:
+ | Stitch quality on 4K-mode footage | Looks clean at preview size; full-resolution check pending |
+ | D-Log M to Rec.709 colour | Works; Avata fit (`--fit avata360`) must be chosen by hand today |
+ | Horizon levelling on Avata 360 | Fixed on `djicraft`, verified on frames 300 and 4300 |
+-| GPU rendering (OpenCL) | Detected on AMD (iMac, Radeon Pro 580X via Rusticl, needs `RUSTICL_ENABLE=radeonsi`) and NVIDIA (laptop, GTX 1650 Ti, proprietary driver 615.78.08); footage render on NVIDIA pending |
+-| Hardware video decoding on Linux | Missing (engine never tries VA-API) |
++| GPU rendering (OpenCL) | Detected on AMD (iMac, Radeon Pro 580X via Rusticl, needs `RUSTICL_ENABLE=radeonsi`) and NVIDIA (laptop, GTX 1650 Ti, proprietary driver 615.78.08). NVIDIA end to end on DangTree: NVDEC decode, OpenCL render, NVENC HEVC 10-bit encode |
++| Hardware video decoding on Linux | NVDEC confirmed on NVIDIA; VA-API confirmed on the iMac's Radeon (`decoding with vaapi`) |
+ | Editor (timeline, preview, keyframes) | Not started |
+ | RPM | Not started |
+ 
+@@ -112,7 +112,10 @@ Camera: Avata 360, firmware 01.00.06.00. Stitched output tops out at 3840×1920
+ 5. **100 fps sources.** 100 doesn't divide into 60. The editor needs 50 fps playback/export and slow-motion options (25/30 fps conform).
+ 6. **Rusticl libclc warning.** Fedora's libclc lacks Rusticl's recommended patches. Harmless so far; if a render shows wrong colours or blocky patches, suspect this first and compare with a CPU render.
+ 7. **Free DaVinci Resolve on Linux can't import H.264/H.265.** Exports meant for Resolve need DNxHR (or ProRes) in `.mov`.
+-8. **Licensing.** RPM Fusion's FFmpeg is a GPL build. The RPM must depend on it, not bundle it, and keep OpenOSV's `LICENSE` and `NOTICE`.
++8. **Encoder was NVIDIA-only (fixed, `phase1-encoder.patch`).** `osvtool` hard-coded `hevc_nvenc`, which loads but fails to open on AMD/Intel machines a second too late for the pipe's fallback to catch, so exports produced no file on the iMac. `--codec` now defaults to `auto`: the tool probes hevc_nvenc, hevc_vaapi, hevc_qsv, hevc_amf, hevc_videotoolbox, libx265 and uses the first that runs. VA-API and QSV encode flags added to the pipe.
++9. **OpenCL render crashes on the iMac's Radeon** (`nir_shader not fully linked`) and falls back to CPU. A Rusticl/libclc compiler bug on the engine's GPU kernels; needs debugging on AMD hardware, not reproducible without a GPU. The render still completes on the CPU. Investigate in Phase 1.
++10. **Render speed is low.** 4K 360° export of DangTree on the GTX 1650 Ti laptop: about 28 s of one-time clip analysis, then 1.8 fps (the 85 s clip would take about 80 minutes). CPU time was 2.3× wall time, so a CPU stage is likely the bottleneck rather than the GPU. Profile in Phase 1.
++9. **Licensing.** RPM Fusion's FFmpeg is a GPL build. The RPM must depend on it, not bundle it, and keep OpenOSV's `LICENSE` and `NOTICE`.
+ 
+ ## Phases
+ 
+@@ -128,11 +131,13 @@ Each phase ends with something usable and a check done on the iMac with real foo
+ 
+ ### Phase 1: Engine fixes
+ 
+-- VA-API hardware decoding (AMD, Intel); confirm the existing NVDEC path on an NVIDIA machine.
+-- The app sets `RUSTICL_ENABLE` itself and reports the GPU it's using; OpenCL verified on AMD, Intel and NVIDIA.
+-- Pick the D-Log M fit and look from the camera model; Normal-colour clips pass through untouched.
++- VA-API hardware decoding (AMD, Intel): confirmed on the iMac's Radeon Pro 580X with `mesa-va-drivers-freeworld`. NVDEC confirmed on the NVIDIA laptop.
++- Encoder auto-selection (`phase1-encoder.patch`): `--codec auto` probes for a working HEVC encoder, awaiting the iMac test.
++- OpenCL render crash on the Radeon (Rusticl/libclc): open; render falls back to CPU meanwhile.
++- The app sets `RUSTICL_ENABLE` itself: written (`phase1-zero-config.patch`), awaiting the iMac test. OpenCL confirmed on AMD and NVIDIA; Intel untested.
++- Pick the D-Log M fit from the camera model: written (`phase1-zero-config.patch`), awaiting the iMac test. Normal-colour clips pass through untouched.
+ - Read the pilot's recorded view (pan, tilt, FOV, roll) and the gimbal mode (Follow / FPV) from the metadata, if the clip holds them.
+-- Measure real render speed on the GPU (a 3-second MP4 render) and record it here.
++- Find the render bottleneck (1.8 fps at 4K on the GTX 1650 Ti) and fix it; measure the iMac too.
+ - Full-resolution seam check on 4K-mode footage; test 8K footage once recorded.
+ - **Done when:** DangTree renders level, correctly coloured and GPU-accelerated with no manual flags, on the iMac and on an NVIDIA machine.
+ 
+@@ -219,6 +224,8 @@ Every engine fix is offered to [Kemerd/OpenOSV](https://github.com/Kemerd/OpenOS
+ 
+ | Date | Session |
+ |---|---|
++| 2026-11-10 | iMac VA-API decode confirmed (`decoding with vaapi`). Two AMD-only bugs surfaced: the NVIDIA-only encoder default (fixed: `--codec auto` probe) and a Rusticl OpenCL kernel crash (open; CPU fallback works). |
++| 2026-11-09 | NVIDIA footage test: 300 frames of DangTree at 3840×1920 rendered level with NVDEC + OpenCL + NVENC; levelling fix chose a −90° pitch turn (0.962 vs 0.193 for no turn); 1.8 fps steady state. |
+ | 2026-11-09 | Phase 0 complete: fresh clone built on an NVIDIA laptop (GTX 1650 Ti, OpenCL 3.0 via the proprietary driver). Build guide fixed for fresh installs and Secure Boot. |
+ | 2026-11-09 | Phase 0: GitHub fork `pcwizardsinc/DJIStudioCraft` created; branch `djicraft` pushed with the Fedora build and Avata levelling commits. |
+ | 2026-11-09 | Scope set: Avata 360 video only, all recording modes; any GPU on Fedora; name "Avata 360 Editor"; fixes go to the fork and upstream. |
+diff --git a/include/osv/io/FfmpegPipe.h b/include/osv/io/FfmpegPipe.h
+index 18df2c3..1b0b39f 100644
+--- a/include/osv/io/FfmpegPipe.h
++++ b/include/osv/io/FfmpegPipe.h
+@@ -101,6 +101,14 @@ public:
+     /// Resolve the ffmpeg executable (options.ffmpegExe, OSV_FFMPEG_EXE, PATH).
+     static std::filesystem::path resolveExecutable(const std::filesystem::path& preferred);
+ 
++    /// Name of the first HEVC encoder in `preference` that this ffmpeg can
++    /// actually start (each is test-run once on a 5-frame synthetic clip with
++    /// the very quality flags buildFfmpegArgs would use), or an empty string
++    /// when none works.  The probe result is cached per ffmpeg path, so a
++    /// render pays for it once.  `ffmpegExe` is resolved as in open().
++    [[nodiscard]] static std::string bestHevcEncoder(const std::filesystem::path& ffmpegExe,
++                                                     const std::vector<std::string>& preference, int crf);
++
+ private:
+     struct Impl;
+     std::unique_ptr<Impl> m_impl;
+diff --git a/include/osv/video/HwAccel.h b/include/osv/video/HwAccel.h
+index 7c605a3..c5c9d57 100644
+--- a/include/osv/video/HwAccel.h
++++ b/include/osv/video/HwAccel.h
+@@ -26,7 +26,11 @@ enum class HwAccel : std::uint8_t {
+     Auto = 3,     ///< Try Cuda, then D3D11VA (macOS: VideoToolbox), then None.
+     /// Apple's VideoToolbox through FFmpeg's hwaccel (macOS).  Frames come
+     /// back to host memory as P010, exactly like the D3D11VA path.
+-    VideoToolbox = 4
++    VideoToolbox = 4,
++    /// VA-API through FFmpeg's hwaccel (Linux: AMD and Intel GPUs, through
++    /// Mesa or Intel's media driver).  Frames come back to host memory as
++    /// P010, exactly like the D3D11VA and VideoToolbox paths.
++    Vaapi = 5
+ };
+ 
+ /// The hardware back-end of this platform whose frames come back to host
+@@ -34,6 +38,8 @@ enum class HwAccel : std::uint8_t {
+ /// the importer's host-frame path and its analyses try before software.
+ #if defined(__APPLE__)
+ inline constexpr HwAccel kHostFrameHwAccel = HwAccel::VideoToolbox;
++#elif defined(__linux__)
++inline constexpr HwAccel kHostFrameHwAccel = HwAccel::Vaapi;
+ #else
+ inline constexpr HwAccel kHostFrameHwAccel = HwAccel::D3D11VA;
+ #endif
+diff --git a/plugins/importer/ImporterInstance.cpp b/plugins/importer/ImporterInstance.cpp
+index 1e5da17..3300157 100644
+--- a/plugins/importer/ImporterInstance.cpp
++++ b/plugins/importer/ImporterInstance.cpp
+@@ -174,8 +174,15 @@ private:
+     }
+ }
+ 
+-/// Map the prefs enum onto the library's D-Log M curve fit.
+-[[nodiscard]] color::DlogMFit toDlogMFit(PrefsDlogmFit fit) noexcept {
++/// Map the prefs enum onto the library's D-Log M curve fit for a clip from
++/// `schema`'s camera.  The Osmo 360 fit is the project default, so an Avata
++/// 360 clip left on that default gets its own camera's fit instead: the
++/// Osmo 360 curve is never the right one for Avata footage.  Every other
++/// choice is honoured as made.
++[[nodiscard]] color::DlogMFit toDlogMFit(PrefsDlogmFit fit, meta::DjmdSchema schema) noexcept {
++    if (fit == PrefsDlogmFit::Osmo360 && schema == meta::DjmdSchema::Avata360) {
++        return color::DlogMFit::Avata360;
++    }
+     switch (fit) {
+     case PrefsDlogmFit::Pocket3:  return color::DlogMFit::Pocket3;
+     case PrefsDlogmFit::DjiRefit: return color::DlogMFit::DjiRefit;
+@@ -1113,6 +1120,15 @@ Status ImporterInstance::ensureReader() {
+     if (!m_hwDecodeFailed && !proxySoftware) {
+ #if defined(__APPLE__)
+         order.push_back(video::HwAccel::VideoToolbox);
++#elif defined(__linux__)
++        // Linux: NVDEC first, then VA-API (AMD, Intel) with the same host
++        // copy as D3D11VA.  NVDEC leads because a VA-API device can open on a
++        // driver without HEVC Main10 (Fedora's own Mesa, an older Intel
++        // iGPU beside an NVIDIA GPU) and then drop the stream to software,
++        // where NVDEC would have decoded it; on a machine without NVIDIA
++        // hardware NVDEC fails at once and costs nothing.
++        order.push_back(video::HwAccel::Cuda);
++        order.push_back(video::HwAccel::Vaapi);
+ #else
+         order.push_back(video::HwAccel::D3D11VA);
+         order.push_back(video::HwAccel::Cuda);
+@@ -1985,7 +2001,7 @@ void ImporterInstance::rebuildColor() {
+     // Rec.709 (the one output with a fitted look) and ignores it otherwise.
+     // [WP-HDRPEAK] Likewise the HDR peak, which only the PQ output uses, and
+     // [WP-HDRTONE] the transfer function, which only D-Log M to PQ / HLG uses.
+-    m_color = color::makeColorParams(toDlogMFit(m_prefs.fit()), toOutputTransfer(m_prefs.color()),
++    m_color = color::makeColorParams(toDlogMFit(m_prefs.fit(), m_track.schema()), toOutputTransfer(m_prefs.color()),
+                                      m_prefs.exposureStops, input, true,
+                                      video::kDecodedSampleBits, nullptr, color::kBt2408SceneScale,
+                                      toLook(m_prefs.lookChoice()), m_prefs.hdrPeakNits(),
+@@ -3529,7 +3545,7 @@ std::optional<SceneLightRequest> ImporterInstance::sceneRequestLocked() {
+         // no exposure offset - the cap is compared against METERED grey.
+         r.rig = m_baseRig;
+         r.blend = m_blend;
+-        r.linearColor = color::makeColorParams(toDlogMFit(m_prefs.fit()), color::OutputTransfer::Linear, 0.0f,
++        r.linearColor = color::makeColorParams(toDlogMFit(m_prefs.fit(), m_track.schema()), color::OutputTransfer::Linear, 0.0f,
+                                                inputEncodingFor(m_format.colorMode), true, video::kDecodedSampleBits);
+         return r;
+     } catch (const std::exception& e) {
+@@ -4405,7 +4421,7 @@ Result<ImporterInstance::DirectFrame> ImporterInstance::directFrame(std::uint32_
+         // working space rolls off into the peak chosen for it.
+         // [WP-HDRTONE] And its transfer function: a Rec.709 clip rendered
+         // into a PQ or HLG working space gets the style chosen for HDR.
+-        color = color::makeColorParams(toDlogMFit(m_prefs.fit()), static_cast<color::OutputTransfer>(outputTransfer),
++        color = color::makeColorParams(toDlogMFit(m_prefs.fit(), m_track.schema()), static_cast<color::OutputTransfer>(outputTransfer),
+                                        m_prefs.exposureStops, inputEncodingFor(m_format.colorMode), true,
+                                        video::kDecodedSampleBits, nullptr,
+                                        color::kBt2408SceneScale, toLook(m_prefs.lookChoice()),
+@@ -4608,7 +4624,7 @@ OsvColorParams ImporterInstance::colorForTransfer(int outputTransfer) const {
+     // connection-space override renders the look the user chose,
+     // [WP-HDRPEAK] a PQ one the HDR peak the user chose, and [WP-HDRTONE] a
+     // PQ or HLG one the transfer function the user chose.
+-    return color::makeColorParams(toDlogMFit(m_prefs.fit()), static_cast<color::OutputTransfer>(outputTransfer),
++    return color::makeColorParams(toDlogMFit(m_prefs.fit(), m_track.schema()), static_cast<color::OutputTransfer>(outputTransfer),
+                                   m_prefs.exposureStops, inputEncodingFor(m_format.colorMode), true,
+                                   video::kDecodedSampleBits, nullptr, color::kBt2408SceneScale,
+                                   toLook(m_prefs.lookChoice()), m_prefs.hdrPeakNits(),
+diff --git a/src/osv/io/FfmpegPipe.cpp b/src/osv/io/FfmpegPipe.cpp
+index 88a7653..5bdca24 100644
+--- a/src/osv/io/FfmpegPipe.cpp
++++ b/src/osv/io/FfmpegPipe.cpp
+@@ -5,6 +5,9 @@
+ #include "osv/core/Log.h"
+ 
+ #include <algorithm>
++#include <unordered_map>
++#include <mutex>
++#include <array>
+ #include <cmath>
+ #include <cstdint>
+ #include <cstdlib>
+@@ -317,6 +320,18 @@ std::vector<std::string> buildFfmpegArgs(const FfmpegPipeOptions& o, const std::
+         a.push_back("0");
+         a.push_back("-profile:v");
+         a.push_back("main10");
++    } else if (codec.find("qsv") != std::string::npos) {
++        // Intel Quick Sync (hevc_qsv): global_quality is its CRF-equivalent.
++        a.push_back("-global_quality");
++        a.push_back(std::to_string(o.crf));
++        a.push_back("-profile:v");
++        a.push_back("main10");
++    } else if (codec.find("vaapi") != std::string::npos) {
++        // VA-API encoders (hevc_vaapi) take -qp for constant quality.
++        a.push_back("-qp");
++        a.push_back(std::to_string(std::clamp(o.crf, 0, 51)));
++        a.push_back("-profile:v");
++        a.push_back("main10");
+     } else if (codec.find("amf") != std::string::npos) {
+         // AMD AMF encoders (hevc_amf, h264_amf, av1_amf) do not accept -crf and
+         // silently fall back to a low default bitrate (~25 Mbps at 8K) unless
+@@ -581,6 +596,52 @@ struct FfmpegPipeWriter::Impl {
+ #endif
+     }
+ 
++    /// Run `args` to completion (no frames are fed: the child reads its own
++    /// lavfi input), killing it after `timeoutMs`.  Returns true only when
++    /// ffmpeg exits 0 - used by bestHevcEncoder to test an encoder for real.
++    bool runToCompletion(const std::filesystem::path& exe, const std::vector<std::string>& args, unsigned timeoutMs,
++                         std::string* error) {
++        if (!start(exe, args, 0, error)) {
++            // start() with probeMs 0 never reports the early-exit path, so a
++            // false here is a genuine spawn failure.
++            return false;
++        }
++#if defined(_WIN32)
++        CloseHandle(stdinWrite);  // the child uses lavfi, not our pipe
++        stdinWrite = nullptr;
++        const DWORD waited = WaitForSingleObject(process, timeoutMs);
++        DWORD code = 1;
++        if (waited == WAIT_OBJECT_0) {
++            GetExitCodeProcess(process, &code);
++        } else {
++            TerminateProcess(process, 1);
++        }
++        CloseHandle(process);
++        process = nullptr;
++        if (waited != WAIT_OBJECT_0 && error) {
++            *error = "encoder probe timed out";
++        }
++        return waited == WAIT_OBJECT_0 && code == 0;
++#else
++        if (stdinWrite >= 0) {
++            ::close(stdinWrite);  // the child uses lavfi, not our pipe
++            stdinWrite = -1;
++        }
++        int status = 0;
++        if (!waitForExit(process, timeoutMs, &status)) {
++            ::kill(process, SIGKILL);
++            (void)waitForExit(process, 2000, &status);
++            process = -1;
++            if (error) {
++                *error = "encoder probe timed out";
++            }
++            return false;
++        }
++        process = -1;
++        return exitCodeOf(status) == 0;
++#endif
++    }
++
+     bool writeAll(const std::uint8_t* data, std::size_t bytes) noexcept {
+ #if defined(_WIN32)
+         while (bytes > 0) {
+@@ -671,6 +732,88 @@ std::filesystem::path FfmpegPipeWriter::resolveExecutable(const std::filesystem:
+     return std::filesystem::path("ffmpeg");
+ }
+ 
++std::string FfmpegPipeWriter::bestHevcEncoder(const std::filesystem::path& ffmpegExe,
++                                             const std::vector<std::string>& preference, int crf) {
++    // Cache the answer per (resolved ffmpeg path + encoder list + crf family):
++    // the test run spawns ffmpeg once per candidate, so a multi-clip render or
++    // the GUI probing at startup pays only on the first call.
++    static std::mutex cacheMutex;
++    static std::unordered_map<std::string, std::string> cache;
++
++    const std::filesystem::path exe = resolveExecutable(ffmpegExe);
++    std::string key = exe.string();
++    key.push_back('\n');
++    for (const std::string& c : preference) {
++        key += c;
++        key.push_back(',');
++    }
++    {
++        std::lock_guard<std::mutex> lock(cacheMutex);
++        const auto it = cache.find(key);
++        if (it != cache.end()) {
++            return it->second;
++        }
++    }
++
++    // A tiny synthetic clip through the very quality flags a real render uses,
++    // so an encoder that loads but cannot open (hevc_nvenc with no NVIDIA GPU,
++    // hevc_vaapi with no VA device) is rejected here instead of at the first
++    // streamed frame.  buildFfmpegArgs' per-family block is the authority on
++    // those flags; this mirrors its 10-bit path.
++    FfmpegPipeOptions probe;
++    probe.width = 320;
++    probe.height = 240;
++    probe.fps = 30.0;
++    probe.crf = crf;
++    probe.pixFmt = "yuv420p10le";
++
++    std::string winner;
++    for (const std::string& codec : preference) {
++        std::vector<std::string> a = {"-hide_banner", "-loglevel", "error", "-nostdin", "-f",         "lavfi",
++                                      "-i",           "color=c=black:s=320x240:r=30",   "-frames:v", "5"};
++        // Reuse the real builder for the codec-specific tail, then redirect to
++        // the null muxer: everything after "-i -" in buildFfmpegArgs is the
++        // "-c:v <codec> -pix_fmt ... <quality>" we want, minus the input args.
++        // buildFfmpegArgs ends with "... -c:v <codec> -pix_fmt <fmt> <quality>
++        // -movflags ... -tag:v ... <outpath>".  Copy the span from "-c:v" up
++        // to (but not including) the first container/output flag, so the probe
++        // keeps exactly the encoder and its quality knobs and nothing that
++        // only a real .mp4 muxer accepts; then send it to the null muxer.
++        const std::vector<std::string> full = buildFfmpegArgs(probe, codec, std::filesystem::path("out.mp4"));
++        std::size_t begin = full.size();
++        for (std::size_t i = 0; i + 1 < full.size(); ++i) {
++            if (full[i] == "-c:v") {
++                begin = i;
++                break;
++            }
++        }
++        for (std::size_t i = begin; i < full.size(); ++i) {
++            if (full[i] == "-movflags" || full[i] == "-tag:v") {
++                break;  // container-only tail; the output path follows it
++            }
++            a.push_back(full[i]);
++        }
++        a.push_back("-f");
++        a.push_back("null");
++        a.push_back("-");
++
++        FfmpegPipeWriter w;
++        std::string error;
++        // A 5-frame null encode finishes well within 4 s; a working encoder
++        // exits 0, a broken one exits non-zero.  start() returns false on an
++        // early exit, so success here means "still running after the probe
++        // window" OR "exited cleanly" - distinguish by waiting.
++        if (w.m_impl->runToCompletion(exe, a, 4000, &error)) {
++            winner = codec;
++            break;
++        }
++    }
++
++    std::lock_guard<std::mutex> lock(cacheMutex);
++    cache[key] = winner;
++    return winner;
++}
++
+ Result<FfmpegPipeWriter> FfmpegPipeWriter::open(const FfmpegPipeOptions& options, const std::filesystem::path& out) {
+     if (options.width == 0 || options.height == 0 || options.fps <= 0.0) {
+         return Error{ErrorCode::InvalidArgument, "FfmpegPipeWriter: invalid size or fps"};
+diff --git a/src/osv/render/opencl/OpenClRenderer.cpp b/src/osv/render/opencl/OpenClRenderer.cpp
+index 510e362..d9acfc2 100644
+--- a/src/osv/render/opencl/OpenClRenderer.cpp
++++ b/src/osv/render/opencl/OpenClRenderer.cpp
+@@ -159,7 +159,36 @@ struct DeviceEntry {
+  *
+  * @return  Sorted list of available OpenCL devices.
+  */
++#if defined(__linux__)
++/**
++ * @brief Let Mesa's Rusticl serve AMD and Intel GPUs on Linux.
++ *
++ * Rusticl is Mesa's OpenCL implementation and the only one shipped for AMD
++ * GPUs on Fedora, but it exposes no device unless RUSTICL_ENABLE names the
++ * driver.  Unless the user set the variable, enable it for radeonsi (AMD)
++ * and iris (Intel) before the first OpenCL call loads the ICDs.  NVIDIA and
++ * Intel's own compute runtime are unaffected; a duplicate Intel device from
++ * both runtimes is harmless because only the best-ranked device is used.
++ */
++void enableRusticlOnce() {
++    static std::once_flag once;
++    std::call_once(once, [] {
++        if (std::getenv("RUSTICL_ENABLE") != nullptr) {
++            log::debug("OpenCL: RUSTICL_ENABLE={} (set by the user)", std::getenv("RUSTICL_ENABLE"));
++            return;
++        }
++        if (::setenv("RUSTICL_ENABLE", "radeonsi,iris", 0) == 0) {
++            log::debug("OpenCL: enabled Mesa Rusticl for AMD and Intel GPUs (RUSTICL_ENABLE=radeonsi,iris); "
++                      "set RUSTICL_ENABLE yourself to override");
++        }
++    });
++}
++#endif
++
+ std::vector<DeviceEntry> enumerateDevices() {
++#if defined(__linux__)
++    enableRusticlOnce();
++#endif
+     std::vector<DeviceEntry> result;
+     cl_uint platformCount = 0;
+     if (clGetPlatformIDs(0, nullptr, &platformCount) != CL_SUCCESS || platformCount == 0) {
+diff --git a/src/osv/video/Decoder.cpp b/src/osv/video/Decoder.cpp
+index d4ed646..8a0a21e 100644
+--- a/src/osv/video/Decoder.cpp
++++ b/src/osv/video/Decoder.cpp
+@@ -232,6 +232,7 @@ AVHWDeviceType hwDeviceType(HwAccel hw) noexcept {
+     case HwAccel::D3D11VA: return AV_HWDEVICE_TYPE_D3D11VA;
+     case HwAccel::Cuda: return AV_HWDEVICE_TYPE_CUDA;
+     case HwAccel::VideoToolbox: return AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
++    case HwAccel::Vaapi: return AV_HWDEVICE_TYPE_VAAPI;
+     case HwAccel::None:
+     case HwAccel::Auto:
+     default: return AV_HWDEVICE_TYPE_NONE;
+@@ -250,6 +251,7 @@ const char* hwAccelName(HwAccel hw) noexcept {
+     case HwAccel::Cuda: return "cuda";
+     case HwAccel::Auto: return "auto";
+     case HwAccel::VideoToolbox: return "videotoolbox";
++    case HwAccel::Vaapi: return "vaapi";
+     }
+     return "none";
+ }
+@@ -276,6 +278,9 @@ std::optional<HwAccel> parseHwAccel(std::string_view text) noexcept {
+     if (lower == "videotoolbox" || lower == "vt") {
+         return HwAccel::VideoToolbox;
+     }
++    if (lower == "vaapi" || lower == "va-api" || lower == "va") {
++        return HwAccel::Vaapi;
++    }
+     return std::nullopt;
+ }
+ 
+@@ -1438,6 +1443,11 @@ struct HevcStreamDecoder::Impl {
+             // macOS has neither NVDEC nor Direct3D; VideoToolbox is the
+             // hardware HEVC decoder on every Apple Silicon and T2 Mac.
+             attempts = {HwAccel::VideoToolbox};
++#elif defined(__linux__)
++            // Linux has no Direct3D; VA-API serves AMD and Intel GPUs, NVDEC
++            // NVIDIA's.  NVDEC first, as on Windows: where both exist (an
++            // NVIDIA laptop with Intel graphics) the discrete GPU decodes.
++            attempts = {HwAccel::Cuda, HwAccel::Vaapi};
+ #else
+             attempts = {HwAccel::Cuda, HwAccel::D3D11VA};
+ #endif
+@@ -1993,6 +2003,8 @@ std::vector<std::string> HevcStreamDecoder::availableHwAccels() {
+             names.emplace_back(hwAccelName(HwAccel::Cuda));
+         } else if (t == AV_HWDEVICE_TYPE_VIDEOTOOLBOX) {
+             names.emplace_back(hwAccelName(HwAccel::VideoToolbox));
++        } else if (t == AV_HWDEVICE_TYPE_VAAPI) {
++            names.emplace_back(hwAccelName(HwAccel::Vaapi));
+         }
+     }
+     return names;
+diff --git a/tools/osvtool/CmdDecodeReplay.cpp b/tools/osvtool/CmdDecodeReplay.cpp
+index e2409ee..8104d0b 100644
+--- a/tools/osvtool/CmdDecodeReplay.cpp
++++ b/tools/osvtool/CmdDecodeReplay.cpp
+@@ -927,7 +927,7 @@ void registerDecodeReplayCommand(CLI::App& app, CommandContext& ctx) {
+ #if defined(__APPLE__)
+     sub->add_option("--hw", opt->hw, "Decoder of the replay: none, videotoolbox")->capture_default_str();
+ #else
+-    sub->add_option("--hw", opt->hw, "Decoder of the replay: none, d3d11va, cuda (FFmpeg NVDEC, host copies)")
++    sub->add_option("--hw", opt->hw, "Decoder of the replay: none, d3d11va, cuda (FFmpeg NVDEC, host copies), vaapi (Linux)")
+         ->capture_default_str();
+ #endif
+     sub->add_option("--level", opt->level,
+diff --git a/tools/osvtool/CmdExtract.cpp b/tools/osvtool/CmdExtract.cpp
+index bf432e8..e7d05ce 100644
+--- a/tools/osvtool/CmdExtract.cpp
++++ b/tools/osvtool/CmdExtract.cpp
+@@ -468,7 +468,7 @@ void registerExtractCommand(CLI::App& app, CommandContext& ctx) {
+ #if defined(__APPLE__)
+     sub->add_option("--hw", opt->hw, "Decoder for --frame: none, videotoolbox, auto")->capture_default_str();
+ #else
+-    sub->add_option("--hw", opt->hw, "Decoder for --frame: none, d3d11va, cuda, auto")->capture_default_str();
++    sub->add_option("--hw", opt->hw, "Decoder for --frame: none, d3d11va, cuda, vaapi (Linux), auto")->capture_default_str();
+ #endif
+     sub->add_flag("--container-samples", opt->containerSamples,
+                   "Feed samples from the OpenOSV container parser instead of libavformat (--frame)");
+diff --git a/tools/osvtool/CmdRender.cpp b/tools/osvtool/CmdRender.cpp
+index 536077a..835ef4b 100644
+--- a/tools/osvtool/CmdRender.cpp
++++ b/tools/osvtool/CmdRender.cpp
+@@ -158,7 +158,7 @@ struct RenderOptions {
+     /// byte-identical; a video carries no alpha and says so.
+     bool alpha = false;
+     std::string ffmpeg;
+-    std::string codec = "hevc_nvenc";
++    std::string codec = "auto";
+     int crf = 18;
+     bool noAudio = false;
+     // ---- 360 metadata ---------------------------------------------------------
+@@ -616,7 +616,26 @@ public:
+             fo.width = static_cast<std::uint32_t>(w);
+             fo.height = static_cast<std::uint32_t>(h);
+             fo.fps = fps;
+-            fo.codec = o.codec;
++            // [DJI-Craft] "auto": probe for the best HEVC encoder this machine
++            // can actually run, so an AMD or Intel box never commits to
++            // hevc_nvenc and dies at the first frame.  The probe mirrors the
++            // GUI's preference order and is cached, so it costs one short
++            // ffmpeg run per process.  A name given with --codec is honoured
++            // as-is (with libx265 as the pipe's own fallback, as before).
++            if (o.codec == "auto") {
++                static const std::vector<std::string> kPreference = {
++                    "hevc_nvenc", "hevc_vaapi", "hevc_qsv", "hevc_amf", "hevc_videotoolbox", "libx265"};
++                const std::string best =
++                    io::FfmpegPipeWriter::bestHevcEncoder(pathFromUtf8(o.ffmpeg), kPreference, o.crf);
++                if (best.empty()) {
++                    std::fprintf(stderr, "error: no working HEVC encoder found (is ffmpeg installed?)\n");
++                    return kExitRuntime;
++                }
++                fo.codec = best;
++                osv::log::info("render: encoder '{}' (auto-selected)", best);
++            } else {
++                fo.codec = o.codec;
++            }
+             fo.crf = o.crf;
+             fo.transfer = transfer == color::OutputTransfer::HLG      ? io::PipeTransfer::HLG
+                           : transfer == color::OutputTransfer::Rec709 ? io::PipeTransfer::Rec709
+@@ -2092,7 +2111,10 @@ void registerRenderCommand(CLI::App& app, CommandContext& ctx) {
+                       "Write the coverage alpha as a 4th channel into .exr / .tif / .png stills (default: RGB "
+                       "only; videos carry no alpha)");
+     outGeom->add_option("--ffmpeg", opt->ffmpeg, "ffmpeg executable for .mp4 output");
+-    outGeom->add_option("--codec", opt->codec, "Video encoder (hevc_nvenc, libx265, ...)")->default_str("hevc_nvenc");
++    outGeom->add_option("--codec", opt->codec,
++                     "Video encoder: auto (probe for the best this machine can run), or a name "
++                     "(hevc_nvenc, hevc_vaapi, hevc_qsv, hevc_amf, hevc_videotoolbox, libx265)")
++        ->default_str("auto");
+     outGeom->add_option("--crf", opt->crf, "Quality (crf / cq)")->default_val(18);
+     outGeom->add_flag("--no-audio", opt->noAudio, "Do not copy the source audio into the .mp4");
+     // On by default: an equirect video without the tag plays as a flat
+diff --git a/tools/osvtool/Pipeline.cpp b/tools/osvtool/Pipeline.cpp
+index 2968b94..cd75178 100644
+--- a/tools/osvtool/Pipeline.cpp
++++ b/tools/osvtool/Pipeline.cpp
+@@ -161,7 +161,8 @@ void addPipelineOptions(CLI::App* sub, PipelineOptions& opt) {
+     // osmo360 matches DJI's own D-Log M LUT, which DJI ships unchanged for the
+     // Pocket 3 as well; pocket3 is a legacy community fit (see docs/COLOR.md).
+     colorGroup->add_option("--fit", opt.fit,
+-                           "D-Log M curve: osmo360 (DJI-matched, also for Pocket 3)|avata360|dji|pocket3 (legacy)")
++                           "D-Log M curve: osmo360 (DJI-matched, also for Pocket 3; on Avata 360 clips the default becomes "
++                           "avata360)|avata360|dji|pocket3 (legacy)")
+         ->default_str("osmo360");
+     colorGroup->add_option("--input-encoding", opt.inputEncoding, "auto|dlogm|hlg|normal")->default_str("auto");
+     colorGroup->add_option("--exposure", opt.exposureStops, "Exposure offset in stops")->default_val(0.0);
+@@ -181,7 +182,7 @@ void addPipelineOptions(CLI::App* sub, PipelineOptions& opt) {
+ #if defined(__APPLE__)
+     backendGroup->add_option("--hw", opt.hw, "Decoder acceleration: none|videotoolbox|auto")->default_str("none");
+ #else
+-    backendGroup->add_option("--hw", opt.hw, "Decoder acceleration: none|d3d11va|cuda|auto")->default_str("none");
++    backendGroup->add_option("--hw", opt.hw, "Decoder acceleration: none|d3d11va|cuda|vaapi (Linux)|auto")->default_str("none");
+ #endif
+ #if defined(__APPLE__)
+     backendGroup->add_option("--device", opt.device, "Renderer: cpu|metal|opencl|auto")->default_str("auto");
+-- 
+2.43.0
+

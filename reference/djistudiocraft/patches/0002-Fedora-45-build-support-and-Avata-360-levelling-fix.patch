@@ -1,0 +1,626 @@
+From 27975460b9a87bfcaa1358dbac3543aa85c4c9ce Mon Sep 17 00:00:00 2001
+From: Andrew Chadick <andrew@chadick.org>
+Date: Mon, 9 Nov 2026 13:03:48 -0800
+Subject: [PATCH 2/7] Fedora 45 build support and Avata 360 levelling fix
+
+---
+ CMakeLists.txt                                |  37 ++++
+ cmake/OsvFFmpeg.cmake                         |  24 ++-
+ cmake/OsvImGui.cmake                          |  62 ++++++
+ .../linux/io.github.kemerd.OpenOSV.desktop    |  11 ++
+ src/osv/geom/AttitudeTrack.cpp                |  76 ++++++-
+ tests/unit/test_video.cpp                     |  56 ++++--
+ tools/osvgui/Platform.cpp                     | 185 +++++++++++++++++-
+ tools/osvgui/Platform.h                       |   3 +-
+ 8 files changed, 424 insertions(+), 30 deletions(-)
+ create mode 100644 cmake/OsvImGui.cmake
+ create mode 100644 packaging/linux/io.github.kemerd.OpenOSV.desktop
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c27a245..85fe9d8 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -100,7 +100,21 @@ find_package(fmt CONFIG REQUIRED)
+ find_package(spdlog CONFIG REQUIRED)
+ find_package(nlohmann_json CONFIG REQUIRED)
+ find_package(CLI11 CONFIG REQUIRED)
++# tinyexr: vcpkg exports unofficial::tinyexr::tinyexr; the Fedora
++# (tinyexr-devel) and Debian/Ubuntu (libtinyexr-dev) packages export the
++# upstream tinyexr::tinyexr (or a bare tinyexr) instead.  Normalise them all
++# to the vcpkg name the module CMakeLists.txt files link against.
+ find_package(tinyexr CONFIG REQUIRED)
++if(NOT TARGET unofficial::tinyexr::tinyexr)
++  add_library(unofficial::tinyexr::tinyexr INTERFACE IMPORTED)
++  if(TARGET tinyexr::tinyexr)
++    target_link_libraries(unofficial::tinyexr::tinyexr INTERFACE tinyexr::tinyexr)
++  elseif(TARGET tinyexr)
++    target_link_libraries(unofficial::tinyexr::tinyexr INTERFACE tinyexr)
++  else()
++    message(FATAL_ERROR "tinyexr was found but exports no known target (install tinyexr-devel)")
++  endif()
++endif()
+ 
+ # OpenOSV Studio (tools/osvgui), the desktop app in front of osvtool, draws
+ # with Dear ImGui on GLFW + OpenGL 3.  vcpkg.json asks for both on Windows
+@@ -110,6 +124,13 @@ find_package(tinyexr CONFIG REQUIRED)
+ find_package(imgui CONFIG QUIET)
+ find_package(glfw3 CONFIG QUIET)
+ find_package(OpenGL QUIET)
++# Linux: glfw-devel and the GL headers come from the distribution, Dear ImGui
++# (with its GLFW + OpenGL 3 backends) is built from source (cmake/OsvImGui.cmake).
++option(OSV_FETCH_IMGUI "Linux: build Dear ImGui from source when no imgui package is found" ON)
++if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND OSV_FETCH_IMGUI AND NOT TARGET imgui::imgui
++   AND TARGET glfw AND TARGET OpenGL::GL)
++  include(OsvImGui)
++endif()
+ if(TARGET imgui::imgui AND TARGET glfw AND TARGET OpenGL::GL)
+   set(_osv_gui_available ON)
+ else()
+@@ -171,6 +192,22 @@ if(OSV_BUILD_OFX)
+   endif()
+ endif()
+ 
++# -----------------------------------------------------------------------------
++#  Install (Linux: `cmake --install build`, or an RPM %install section)
++# -----------------------------------------------------------------------------
++if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++  include(GNUInstallDirs)
++  if(TARGET osvtool)
++    install(TARGETS osvtool RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
++  endif()
++  if(TARGET osvgui)
++    install(TARGETS osvgui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
++    install(FILES packaging/linux/io.github.kemerd.OpenOSV.desktop
++            DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
++  endif()
++  install(FILES LICENSE NOTICE DESTINATION ${CMAKE_INSTALL_DOCDIR})
++endif()
++
+ # -----------------------------------------------------------------------------
+ #  Summary
+ # -----------------------------------------------------------------------------
+diff --git a/cmake/OsvFFmpeg.cmake b/cmake/OsvFFmpeg.cmake
+index c0dd5cb..c35fe62 100644
+--- a/cmake/OsvFFmpeg.cmake
++++ b/cmake/OsvFFmpeg.cmake
+@@ -24,12 +24,24 @@ endforeach()
+ 
+ # vcpkg ships a FindFFMPEG.cmake wrapper that fills FFMPEG_INCLUDE_DIRS,
+ # FFMPEG_LIBRARIES and FFMPEG_LIBRARY_DIRS for the enabled components.
+-find_package(FFMPEG REQUIRED)
+-
+-add_library(osv_ffmpeg INTERFACE)
+-target_include_directories(osv_ffmpeg INTERFACE ${FFMPEG_INCLUDE_DIRS})
+-target_link_directories(osv_ffmpeg INTERFACE ${FFMPEG_LIBRARY_DIRS})
+-target_link_libraries(osv_ffmpeg INTERFACE ${FFMPEG_LIBRARIES})
++#
++# Linux (Fedora and friends) builds against the distribution's FFmpeg instead
++# of vcpkg's.  There is no FindFFMPEG.cmake there, so fall back to pkg-config,
++# which every distro FFmpeg -devel package ships .pc files for.
++if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT DEFINED VCPKG_TOOLCHAIN)
++  find_package(PkgConfig REQUIRED)
++  pkg_check_modules(OSV_LIBAV REQUIRED IMPORTED_TARGET
++    libavcodec libavformat libavutil libswscale libswresample)
++  add_library(osv_ffmpeg INTERFACE)
++  target_link_libraries(osv_ffmpeg INTERFACE PkgConfig::OSV_LIBAV)
++  set(FFMPEG_INCLUDE_DIRS ${OSV_LIBAV_INCLUDE_DIRS})
++else()
++  find_package(FFMPEG REQUIRED)
++  add_library(osv_ffmpeg INTERFACE)
++  target_include_directories(osv_ffmpeg INTERFACE ${FFMPEG_INCLUDE_DIRS})
++  target_link_directories(osv_ffmpeg INTERFACE ${FFMPEG_LIBRARY_DIRS})
++  target_link_libraries(osv_ffmpeg INTERFACE ${FFMPEG_LIBRARIES})
++endif()
+ 
+ # FFmpeg's public headers are C; make sure C++ consumers see the correct
+ # declarations of the stdint macros they rely on.
+diff --git a/cmake/OsvImGui.cmake b/cmake/OsvImGui.cmake
+new file mode 100644
+index 0000000..ecd1506
+--- /dev/null
++++ b/cmake/OsvImGui.cmake
+@@ -0,0 +1,62 @@
++# =============================================================================
++#  OsvImGui.cmake
++#
++#  Dear ImGui for OpenOSV Studio (tools/osvgui) on systems without vcpkg.
++#
++#  vcpkg builds imgui with its GLFW + OpenGL 3 backends and exports
++#  imgui::imgui.  Linux distributions either do not package Dear ImGui or
++#  package it without those backends, so on Linux the same release vcpkg pins
++#  (v1.92.9b) is compiled here, from one of:
++#
++#    OSV_IMGUI_SOURCE_DIR  an unpacked imgui-1.92.9b tree (offline / RPM
++#                          builds: ship the tarball as a second Source and
++#                          point this at it)
++#    otherwise             the release tarball, downloaded at configure time
++#                          and checked against its SHA-256.
++#
++#  Result: the static target imgui::imgui with the include layout the app's
++#  sources expect (<imgui.h>, <imgui_impl_glfw.h>, <imgui_impl_opengl3.h>,
++#  <imgui_stdlib.h>).
++# =============================================================================
++if(TARGET imgui::imgui)
++  return()
++endif()
++
++set(OSV_IMGUI_VERSION "1.92.9b")
++set(OSV_IMGUI_SHA256 "21d8a0a565e85dce943e375db00812c2f3f0ab21f3f0f7964e364a63422d7f99")
++set(OSV_IMGUI_SOURCE_DIR "" CACHE PATH "Unpacked Dear ImGui ${OSV_IMGUI_VERSION} source tree (skips the download)")
++
++if(OSV_IMGUI_SOURCE_DIR)
++  set(_imgui_dir "${OSV_IMGUI_SOURCE_DIR}")
++else()
++  include(FetchContent)
++  FetchContent_Declare(osv_imgui
++    URL "https://github.com/ocornut/imgui/archive/refs/tags/v${OSV_IMGUI_VERSION}.tar.gz"
++    URL_HASH "SHA256=${OSV_IMGUI_SHA256}"
++    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
++  FetchContent_MakeAvailable(osv_imgui)
++  set(_imgui_dir "${osv_imgui_SOURCE_DIR}")
++endif()
++
++if(NOT EXISTS "${_imgui_dir}/imgui.cpp" OR NOT EXISTS "${_imgui_dir}/backends/imgui_impl_glfw.cpp")
++  message(FATAL_ERROR "Dear ImGui sources not found in '${_imgui_dir}'")
++endif()
++
++add_library(osv_imgui STATIC
++  "${_imgui_dir}/imgui.cpp"
++  "${_imgui_dir}/imgui_draw.cpp"
++  "${_imgui_dir}/imgui_tables.cpp"
++  "${_imgui_dir}/imgui_widgets.cpp"
++  "${_imgui_dir}/imgui_demo.cpp"
++  "${_imgui_dir}/backends/imgui_impl_glfw.cpp"
++  "${_imgui_dir}/backends/imgui_impl_opengl3.cpp"
++  "${_imgui_dir}/misc/cpp/imgui_stdlib.cpp")
++target_include_directories(osv_imgui SYSTEM PUBLIC
++  "${_imgui_dir}"
++  "${_imgui_dir}/backends"
++  "${_imgui_dir}/misc/cpp")
++target_link_libraries(osv_imgui PUBLIC glfw OpenGL::GL ${CMAKE_DL_LIBS})
++set_target_properties(osv_imgui PROPERTIES FOLDER "third_party" POSITION_INDEPENDENT_CODE ON)
++add_library(imgui::imgui ALIAS osv_imgui)
++
++message(STATUS "Dear ImGui     : ${OSV_IMGUI_VERSION} built from ${_imgui_dir}")
+diff --git a/packaging/linux/io.github.kemerd.OpenOSV.desktop b/packaging/linux/io.github.kemerd.OpenOSV.desktop
+new file mode 100644
+index 0000000..de758ab
+--- /dev/null
++++ b/packaging/linux/io.github.kemerd.OpenOSV.desktop
+@@ -0,0 +1,11 @@
++[Desktop Entry]
++Type=Application
++Name=OpenOSV Studio
++GenericName=360 Video Stitcher
++Comment=Stitch, grade and reframe DJI Osmo 360 / Avata 360 .OSV footage
++Exec=osvgui %F
++Icon=video-x-generic
++Terminal=false
++Categories=AudioVideo;Video;AudioVideoEditing;
++MimeType=video/mp4;video/quicktime;
++Keywords=360;OSV;DJI;Osmo;Avata;stitch;reframe;
+diff --git a/src/osv/geom/AttitudeTrack.cpp b/src/osv/geom/AttitudeTrack.cpp
+index 6a1b974..02d761e 100644
+--- a/src/osv/geom/AttitudeTrack.cpp
++++ b/src/osv/geom/AttitudeTrack.cpp
+@@ -253,9 +253,83 @@ Result<AttitudeTrack> AttitudeTrack::build(const meta::MetadataTrack& track, con
+     const Quatd mountedFromBody =
+         options.conv.rigAxes ? Quatd::fromMatrix(productMount(track.schema()).transposed()).normalized()
+                              : Quatd::identity();
++    // [DJI-Craft] Avata 360 pitch reading.  On Avata 360 clips recorded with
++    // firmware 01.00.06.00 in 4K / 100 fps mode, the rig-axes reading above
++    // puts the aircraft's nose at the world's down while the aircraft flies
++    // level: the IMU frame differs from the mounted RFU frame by a quarter
++    // turn about the aircraft's right axis.  Upstream verified its reading on
++    // other Avata footage, so the correction is measured, not assumed: of the
++    // four pitch turns about the mounted right axis (0, +90, -90, 180 deg),
++    // the one whose mounted up is most vertical over the clip wins - an
++    // aircraft flies near level on average - and 0 is kept unless another
++    // turn is clearly better.  The Osmo 360 (identity mount) never changes.
++    Quatd pitchFix = Quatd::identity();
++    if (options.conv.rigAxes && productMount(track.schema()).distance(Mat3d::identity()) > 0.0) {
++        const Vec3d up = (options.measuredUp.norm() > 0.5) ? options.measuredUp.normalized()
++                                                                 : worldUpVector(options.conv.up);
++        constexpr double kHalfPi = 1.5707963267948966;
++        const Quatd candidates[4] = {Quatd::identity(), Quatd::fromAxisAngle(Vec3d{1.0, 0.0, 0.0}, kHalfPi),
++                                     Quatd::fromAxisAngle(Vec3d{1.0, 0.0, 0.0}, -kHalfPi),
++                                     Quatd::fromAxisAngle(Vec3d{1.0, 0.0, 0.0}, 2.0 * kHalfPi)};
++        double sums[4] = {0.0, 0.0, 0.0, 0.0};
++        std::size_t used = 0;
++        const std::uint32_t step = std::max<std::uint32_t>(1u, frameCount / 200u);
++        for (std::uint32_t i = 0; i < frameCount; i += step) {
++            const Result<meta::FrameMeta> fr = track.frame(i);
++            if (!fr.ok()) {
++                continue;
++            }
++            const meta::FrameMeta& f = fr.value();
++            const meta::Quaternion* q = nullptr;
++            if (f.camera.attitude.present) {
++                q = &f.camera.attitude;
++            } else if (f.imu.has_value() && f.imu->current.present) {
++                for (const meta::Quaternion& c : f.imu->current.q) {
++                    if (c.present) {
++                        q = &c;
++                        break;
++                    }
++                }
++            }
++            if (!q) {
++                continue;
++            }
++            const Quatd wFromMounted = worldFromBodyQuat(*q, options.conv);
++            for (int k = 0; k < 4; ++k) {
++                const Vec3d mountedUp = (wFromMounted * candidates[k]).toMatrix() * Vec3d{0.0, 0.0, 1.0};
++                if (mountedUp.isFinite()) {
++                    sums[k] += mountedUp.dot(up);
++                }
++            }
++            ++used;
++        }
++        if (used > 0) {
++            int best = 0;
++            for (int k = 1; k < 4; ++k) {
++                if (sums[k] > sums[best]) {
++                    best = k;
++                }
++            }
++            const double meanBest = sums[best] / static_cast<double>(used);
++            const double meanKept = sums[0] / static_cast<double>(used);
++            // Switch only on a clear verdict: the winner near vertical, the
++            // stored reading well short of it.
++            int chosen = 0;
++            if (best != 0 && meanBest > 0.7 && meanBest - meanKept > 0.3) {
++                pitchFix = candidates[best];
++                chosen = best;
++            }
++            static constexpr const char* kNames[4] = {"0", "+90", "-90", "180"};
++            log::info("AttitudeTrack: product-mounted reading: pitch turn {} deg (mounted up . world up over {} "
++                      "frames: 0 deg {:.3f}, +90 {:.3f}, -90 {:.3f}, 180 {:.3f})",
++                      kNames[chosen], used, sums[0] / static_cast<double>(used),
++                      sums[1] / static_cast<double>(used), sums[2] / static_cast<double>(used),
++                      sums[3] / static_cast<double>(used));
++        }
++    }
+     const auto decodeSampleQuat = [&](const meta::Quaternion& q) noexcept -> Quatd {
+         const Quatd wFromMounted = worldFromBodyQuat(q, options.conv);
+-        return options.conv.rigAxes ? (wFromMounted * mountedFromBody).normalized() : wFromMounted;
++        return options.conv.rigAxes ? (wFromMounted * pitchFix * mountedFromBody).normalized() : wFromMounted;
+     };
+ 
+     for (std::uint32_t i = 0; i < frameCount; ++i) {
+diff --git a/tests/unit/test_video.cpp b/tests/unit/test_video.cpp
+index 3456d35..8f272af 100644
+--- a/tests/unit/test_video.cpp
++++ b/tests/unit/test_video.cpp
+@@ -59,6 +59,37 @@ using namespace osv;
+ using namespace osv::video;
+ using Catch::Matchers::WithinAbs;
+ 
++#if !defined(_WIN32)
++#include <sys/wait.h>
++#endif
++
++namespace {
++
++/// std::system() for a command line whose program path is quoted, returning
++/// the program's exit code on every platform.  cmd.exe /c strips one outer
++/// pair of quotes from such a line, so Windows gets one added; POSIX sh would
++/// instead read the whole quoted line as a program name.  On POSIX
++/// std::system() returns a wait status (exit 1 comes back as 256), so it is
++/// decoded with WEXITSTATUS.
++int runShell(const std::string& commandLine) {
++#if defined(_WIN32)
++    return std::system(("\"" + commandLine + "\"").c_str());
++#else
++    const int status = std::system(commandLine.c_str());
++    return (status != -1 && WIFEXITED(status)) ? WEXITSTATUS(status) : -1;
++#endif
++}
++
++/// The null device for shell redirections.
++constexpr const char* kNullDevice =
++#if defined(_WIN32)
++    "nul";
++#else
++    "/dev/null";
++#endif
++
++}  // namespace
++
+ namespace {
+ 
+ // -----------------------------------------------------------------------------
+@@ -2299,11 +2330,8 @@ TEST_CASE("osvtool extract --hevc / --audio / --imu / --frame run end to end", "
+     if (!std::filesystem::exists(tool, ec)) {
+         SKIP("osvtool not built at " << tool.string());
+     }
+-    // Windows cmd needs the whole command line wrapped in an extra pair of
+-    // quotes when the program path itself is quoted.
+     auto run = [&](const std::string& args) {
+-        const std::string cmd = "\"\"" + tool.string() + "\" extract \"" + osvtest::sampleOsv().string() + "\" " + args + "\"";
+-        return std::system(cmd.c_str());
++        return runShell("\"" + tool.string() + "\" extract \"" + osvtest::sampleOsv().string() + "\" " + args);
+     };
+     const std::filesystem::path hevc = osvtest::tempDir() / "cli_track.hevc";
+     const std::filesystem::path aac = osvtest::tempDir() / "cli_audio.aac";
+@@ -2326,9 +2354,9 @@ TEST_CASE("osvtool extract --hevc / --audio / --imu / --frame run end to end", "
+     // Usage errors exit 1, missing input exits 2.
+     REQUIRE(run("--hevc \"" + hevc.string() + "\" --audio \"" + aac.string() + "\"") == 1);
+     REQUIRE(run("--frame 0 --lens 0 --out \"" + (osvtest::tempDir() / "cli_frame.png").string() + "\"") == 1);
+-    const std::string missing = "\"\"" + tool.string() + "\" extract \"" +
+-                                (osvtest::tempDir() / "missing.OSV").string() + "\" --audio \"" + aac.string() + "\"\"";
+-    REQUIRE(std::system(missing.c_str()) == 2);
++    const std::string missing = "\"" + tool.string() + "\" extract \"" +
++                                (osvtest::tempDir() / "missing.OSV").string() + "\" --audio \"" + aac.string() + "\"";
++    REQUIRE(runShell(missing) == 2);
+ }
+ #endif
+ 
+@@ -2599,10 +2627,10 @@ TEST_CASE("osvtool decode-replay replays a logged request order and holds the fr
+     }
+     const std::filesystem::path report = osvtest::tempDir() / "lostref_replay.txt";
+     const std::filesystem::path csv = osvtest::tempDir() / "lostref_replay.csv";
+-    const std::string cmd = "\"\"" + tool.string() + "\" -q decode-replay \"" + lostIdrFixture().string() +
++    const std::string cmd = "\"" + tool.string() + "\" -q decode-replay \"" + lostIdrFixture().string() +
+                             "\" --trace \"" + trace.string() + "\" --tracks 1,2 --threads 2 --csv \"" + csv.string() +
+-                            "\" > \"" + report.string() + "\" 2>&1\"";
+-    const int code = std::system(cmd.c_str());
++                            "\" > \"" + report.string() + "\" 2>&1";
++    const int code = runShell(cmd);
+     std::ifstream in(report);
+     const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+     INFO(text);
+@@ -2619,11 +2647,9 @@ TEST_CASE("osvtool decode-replay replays a logged request order and holds the fr
+     REQUIRE(std::getline(rows, header));
+     CHECK(header.rfind("entry,trace,line,pid,tid,track,frame,logged", 0) == 0);
+     // Usage errors exit 1: no trace, a bad level.
+-    CHECK(std::system(("\"\"" + tool.string() + "\" decode-replay \"" + lostIdrFixture().string() + "\"\"").c_str()) ==
+-          1);
+-    CHECK(std::system(("\"\"" + tool.string() + "\" -q decode-replay \"" + lostIdrFixture().string() + "\" --trace \"" +
+-                       trace.string() + "\" --tracks 1,2 --level frames > nul 2>&1\"")
+-                          .c_str()) == 1);
++    CHECK(runShell("\"" + tool.string() + "\" decode-replay \"" + lostIdrFixture().string() + "\"") == 1);
++    CHECK(runShell("\"" + tool.string() + "\" -q decode-replay \"" + lostIdrFixture().string() + "\" --trace \"" +
++                   trace.string() + "\" --tracks 1,2 --level frames > " + kNullDevice + " 2>&1") == 1);
+ }
+ #endif
+ 
+diff --git a/tools/osvgui/Platform.cpp b/tools/osvgui/Platform.cpp
+index 4f37098..12c7175 100644
+--- a/tools/osvgui/Platform.cpp
++++ b/tools/osvgui/Platform.cpp
+@@ -24,6 +24,7 @@
+ #include <shlobj.h>
+ #include <shobjidl.h>
+ #else
++#include <cerrno>
+ #include <climits>
+ #include <spawn.h>
+ #include <sys/wait.h>
+@@ -434,9 +435,10 @@ fs::path findOnPath(std::string_view name) noexcept {
+ std::vector<fs::path> extraFfmpegLocations() noexcept {
+     std::vector<fs::path> out;
+     try {
+-        // Homebrew (Apple Silicon, then Intel), MacPorts, the system.
+-        for (const char* candidate :
+-             {"/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/local/bin/ffmpeg", "/usr/bin/ffmpeg"}) {
++        // Homebrew (Apple Silicon, then Intel), MacPorts, the system, and the
++        // Flatpak/Snap-free locations Linux users install a static build to.
++        for (const char* candidate : {"/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/local/bin/ffmpeg",
++                                      "/usr/bin/ffmpeg", "/opt/ffmpeg/bin/ffmpeg"}) {
+             if (isExecutableFile(candidate)) {
+                 out.emplace_back(candidate);
+             }
+@@ -451,22 +453,191 @@ void setTaskbarProgress(void*, double, bool, bool) noexcept {}
+ void styleTitleBar(void*, bool, unsigned) noexcept {}
+ 
+ #if !defined(__APPLE__)
+-// ---- no native dialogs outside Windows and macOS: drag and drop instead -------
++// ---- Linux / BSD: GTK or Qt dialogs through zenity or kdialog ---------------
++//
++// Neither GLFW nor Dear ImGui has a file dialog, and linking GTK or Qt into
++// the app for three dialogs would dwarf the app itself.  Every mainstream
++// desktop ships a dialog helper instead: zenity (GNOME, the Fedora
++// Workstation default) or kdialog (KDE Plasma).  The helper prints the chosen
++// paths on stdout, one per line, and exits non-zero on Cancel.
++
++namespace {
++
++enum class DialogTool { None, Zenity, Kdialog };
++
++DialogTool dialogTool() noexcept {
++    // KDE first when the session says so, so Plasma users get Qt dialogs even
++    // with zenity installed; everyone else gets zenity, then kdialog.
++    const char* desktop = std::getenv("XDG_CURRENT_DESKTOP");
++    const bool kde = desktop && std::string_view(desktop).find("KDE") != std::string_view::npos;
++    const bool haveZenity = !findOnPath("zenity").empty();
++    const bool haveKdialog = !findOnPath("kdialog").empty();
++    if (kde && haveKdialog) {
++        return DialogTool::Kdialog;
++    }
++    if (haveZenity) {
++        return DialogTool::Zenity;
++    }
++    if (haveKdialog) {
++        return DialogTool::Kdialog;
++    }
++    return DialogTool::None;
++}
++
++/// Run `argv` (argv[0] looked up on PATH), wait for it, and return its stdout
++/// split into lines.  Empty when the helper fails or the user cancels.
++std::vector<std::string> runForLines(std::vector<std::string> args) noexcept {
++    std::vector<std::string> lines;
++    try {
++        int fds[2] = {-1, -1};
++        if (::pipe(fds) != 0) {
++            return lines;
++        }
++        posix_spawn_file_actions_t actions;
++        posix_spawn_file_actions_init(&actions);
++        posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
++        posix_spawn_file_actions_addclose(&actions, fds[0]);
++        posix_spawn_file_actions_addclose(&actions, fds[1]);
++
++        std::vector<char*> argv;
++        argv.reserve(args.size() + 1);
++        for (std::string& a : args) {
++            argv.push_back(a.data());
++        }
++        argv.push_back(nullptr);
++
++        pid_t pid = -1;
++        const int spawned = ::posix_spawnp(&pid, argv[0], &actions, nullptr, argv.data(), environ);
++        posix_spawn_file_actions_destroy(&actions);
++        ::close(fds[1]);
++        if (spawned != 0 || pid <= 0) {
++            ::close(fds[0]);
++            return lines;
++        }
++
++        std::string out;
++        char buffer[4096];
++        for (;;) {
++            const ssize_t got = ::read(fds[0], buffer, sizeof buffer);
++            if (got > 0) {
++                out.append(buffer, static_cast<std::size_t>(got));
++            } else if (got == 0 || errno != EINTR) {
++                break;
++            }
++        }
++        ::close(fds[0]);
++
++        int status = 0;
++        while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
++        }
++        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
++            return lines;  // Cancel, or the helper failed.
++        }
++
++        std::size_t start = 0;
++        while (start < out.size()) {
++            std::size_t end = out.find('\n', start);
++            if (end == std::string::npos) {
++                end = out.size();
++            }
++            std::string line = out.substr(start, end - start);
++            if (!line.empty() && line.back() == '\r') {
++                line.pop_back();
++            }
++            if (!line.empty()) {
++                lines.push_back(std::move(line));
++            }
++            start = end + 1;
++        }
++    } catch (...) {
++        lines.clear();
++    }
++    return lines;
++}
++
++std::vector<fs::path> toPaths(const std::vector<std::string>& lines) {
++    std::vector<fs::path> out;
++    out.reserve(lines.size());
++    for (const std::string& line : lines) {
++        out.push_back(pathFromUtf8(line));
++    }
++    return out;
++}
++
++std::string homeDirectory() {
++    const char* home = std::getenv("HOME");
++    return home && *home ? std::string(home) + "/" : std::string(".");
++}
++
++}  // namespace
+ 
+ std::vector<fs::path> chooseClips(void*) noexcept {
++    try {
++        switch (dialogTool()) {
++        case DialogTool::Zenity:
++            return toPaths(runForLines({"zenity", "--file-selection", "--multiple", "--separator=\n",
++                                        "--title=Add clips",
++                                        "--file-filter=DJI 360 clips (*.OSV) | *.OSV *.osv",
++                                        "--file-filter=All files | *"}));
++        case DialogTool::Kdialog:
++            return toPaths(runForLines({"kdialog", "--title", "Add clips", "--multiple", "--separate-output",
++                                        "--getopenfilename", homeDirectory(),
++                                        "DJI 360 clips (*.OSV *.osv)\nAll files (*)"}));
++        case DialogTool::None:
++            break;
++        }
++    } catch (...) {
++    }
+     return {};
+ }
+ 
+-std::vector<fs::path> chooseFolders(void*, const char*, bool) noexcept {
++std::vector<fs::path> chooseFolders(void*, const char* title, bool multiple) noexcept {
++    try {
++        const std::string t = title ? title : "Choose a folder";
++        switch (dialogTool()) {
++        case DialogTool::Zenity: {
++            std::vector<std::string> args{"zenity", "--file-selection", "--directory", "--separator=\n",
++                                          "--title=" + t};
++            if (multiple) {
++                args.emplace_back("--multiple");
++            }
++            return toPaths(runForLines(std::move(args)));
++        }
++        case DialogTool::Kdialog:
++            // kdialog picks one folder at a time; "Add folders" can be used again.
++            return toPaths(runForLines({"kdialog", "--title", t, "--getexistingdirectory", homeDirectory()}));
++        case DialogTool::None:
++            break;
++        }
++    } catch (...) {
++    }
+     return {};
+ }
+ 
+-std::optional<fs::path> chooseProgram(void*, const char*) noexcept {
++std::optional<fs::path> chooseProgram(void*, const char* title) noexcept {
++    try {
++        const std::string t = title ? title : "Choose a program";
++        std::vector<fs::path> picked;
++        switch (dialogTool()) {
++        case DialogTool::Zenity:
++            picked = toPaths(runForLines({"zenity", "--file-selection", "--title=" + t, "--filename=/usr/bin/"}));
++            break;
++        case DialogTool::Kdialog:
++            picked = toPaths(runForLines({"kdialog", "--title", t, "--getopenfilename", "/usr/bin/"}));
++            break;
++        case DialogTool::None:
++            break;
++        }
++        if (!picked.empty()) {
++            return picked.front();
++        }
++    } catch (...) {
++    }
+     return std::nullopt;
+ }
+ 
+ bool haveDialogs() noexcept {
+-    return false;
++    return dialogTool() != DialogTool::None;
+ }
+ 
+ namespace {
+diff --git a/tools/osvgui/Platform.h b/tools/osvgui/Platform.h
+index f2de677..3d2e466 100644
+--- a/tools/osvgui/Platform.h
++++ b/tools/osvgui/Platform.h
+@@ -56,7 +56,8 @@ void shutdown() noexcept;
+ /// Pick a program (ffmpeg).  nullopt when cancelled.
+ [[nodiscard]] std::optional<std::filesystem::path> chooseProgram(void* nativeWindow, const char* title) noexcept;
+ 
+-/// True where chooseClips / chooseFolders exist (Windows, macOS).
++/// True where chooseClips / chooseFolders exist (Windows, macOS, and Linux
++/// desktops with zenity or kdialog installed).
+ [[nodiscard]] bool haveDialogs() noexcept;
+ 
+ // ---- the shell ---------------------------------------------------------------------
+-- 
+2.43.0
+

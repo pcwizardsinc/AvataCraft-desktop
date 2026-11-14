@@ -1,0 +1,7 @@
+ad3e092 2026-11-11 Phase 3 live preview and Phase 6 tabbed inspector
+5da793d 2026-11-11 Phase 2: project model and four-region editor shell; UI reference
+54ff109 2026-11-11 Phase 1: VA-API decode, auto encoder selection, Avata colour default, Rusticl auto-enable
+594d3b0 2026-11-09 Build guide: fresh-install and Secure Boot fixes; Phase 0 complete
+ba75ef6 2026-11-09 Add Avata 360 Editor roadmap and Fedora build guide
+2797546 2026-11-09 Fedora 45 build support and Avata 360 levelling fix
+d46b2bc 2026-10-26 OpenCL RX 9070 XT link & Arc A310 arg limit fixes, multi-GPU selection/fallback, UTF-8 FFmpeg paths and AMF CQP (#11)
