@@ -1,3 +1,23 @@
+# AvataCraft-desktop
+
+> **This is a fork of [orbis-reframe](https://github.com/Schabo/orbis-reframe)
+> that adds the DJI Avata 360 drone's `.OSV` files**, so Avata footage can be
+> stitched, stabilized, reframed and exported on Linux without DJI Studio.
+> What changed, why, and what was learned the hard way is in
+> [`FORK.md`](FORK.md); the DJI format facts verified on real clips are in
+> [`docs/formats/dji-360.md`](docs/formats/dji-360.md). Everything else below
+> is upstream's own README and still applies: the Insta360 path is untouched.
+>
+> **Status of the DJI support:** experimental. An `.OSV` opens as one clip
+> with its `.LRF` proxy, stitches from the file's own calibration, reframes,
+> sits on the timeline and exports; GPS and colour mode come from the `.SRT`.
+> Stabilization from the aircraft's attitude is being tested on footage.
+> Tested on one machine (Fedora 45, AMD Radeon Pro 580X); DJI issues go to
+> [this fork's issues](https://github.com/pcwizardsinc/AvataCraft-desktop/issues),
+> everything else to upstream.
+
+---
+
 # orbis-reframe
 
 A native Linux video editor for **360° camera footage**: stitching,

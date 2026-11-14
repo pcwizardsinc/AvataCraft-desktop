@@ -1,3 +1,13 @@
+# Contributing
+
+> **Fork note.** This repository is AvataCraft-desktop, a fork of
+> orbis-reframe adding DJI Avata 360 support ([`FORK.md`](FORK.md)). For
+> anything about `.OSV` files or the DJI reader, open an issue
+> [here](https://github.com/pcwizardsinc/AvataCraft-desktop/issues). For
+> everything else, upstream's guidance below applies and upstream's issue
+> tracker is the right place. Commit messages follow Conventional Commits
+> here too; a CI check enforces it.
+
 # Contributing to orbis-reframe
 
 Thanks for your interest. orbis-reframe is a small project run by one

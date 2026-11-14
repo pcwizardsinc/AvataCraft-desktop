@@ -1,5 +1,15 @@
 # Instructions for coding agents
 
+> **This is the AvataCraft-desktop fork.** Read [`FORK.md`](FORK.md) first:
+> it holds what the DJI code does, the facts verified on real footage, and
+> the mistakes already made so they are not made twice. DJI code lives in
+> `src/camera/Dji*`; keep it there and leave the Insta360 path untouched so
+> the fork can keep tracking upstream. The fork's maintainer builds on
+> Fedora (`FORK.md` has the commands), runs commands exactly as given one
+> block at a time, and tests on real footage that the agent does not have —
+> say so rather than implying a change has been seen working.
+
+
 orbis-reframe is a Linux editor for 360 camera footage: open a dual-fisheye
 clip, stitch it on the GPU, steer a virtual camera through the sphere with
 keyframes, and export a normal flat video. One maintainer, C++20 / Qt 6

@@ -1,4 +1,20 @@
-## v0.9.0 (2026-11-12)
+## Unreleased — AvataCraft-desktop fork (2026-11)
+
+The DJI Avata 360 reader. See [`FORK.md`](FORK.md) for the story.
+
+### Feat
+
+- **camera**: `.OSV` clips open as a 360 clip with their `.LRF` proxy (DjiAvataReader)
+- **camera**: GPS track and colour mode from the `.SRT` beside the clip
+- **camera**: protobuf scanner and `DewarpParams` decoder for the `djmd` tracks
+- **camera**: read the Avata 360's real lens calibration — Kannala-Brandt converted to the stitcher's MEI model, lens order from the video streams, roll 90 to cancel the stitcher's Insta360 sensor clock
+- **camera**: read the Avata 360's attitude track for stabilization and horizon lock
+
+### Fix
+
+- **ui**: the import dialog offers `.OSV` as well as `.osv` (case-sensitive file chooser)
+- **camera**: the MJPEG cover stream is not taken for a third lens
+
 
 ### Feat
 

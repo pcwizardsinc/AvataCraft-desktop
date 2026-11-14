@@ -65,6 +65,7 @@ each is in its document in [`formats/`](formats/README.md).
   correction, and 4K 100 plays at its rate; a renamed clip finds its
   recording time and preview file by the name it holds
   ([`formats/antigravity-a1.md`](formats/antigravity-a1.md)).
+- **DJI Avata 360** — *done in this fork*: a DJI reader, with the Kannala-Brandt lens converted to MEI rather than a second lens model in the stitcher; see [`FORK.md`](../FORK.md).
 - **DJI Osmo 360**: a DJI reader, an equidistant lens model beside the
   current one, D-Log M through a LUT, IMU timing fitted over packets.
 - **GoPro MAX / MAX2**: stitched in the camera into a cubemap over two
