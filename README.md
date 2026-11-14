@@ -8,6 +8,19 @@
 > [`docs/formats/dji-360.md`](docs/formats/dji-360.md). Everything else below
 > is upstream's own README and still applies: the Insta360 path is untouched.
 >
+> Works on mine:
+> OS: Fedora Linux 45 (Workstation Edition) x86_64
+> Host: iMac18,3 (1.0)
+> Kernel: Linux 7.3.3-300.fc45.x86_64
+> Display (iMac): 3840x2160 @ 1.5x in 27", 60 Hz [Built-in]
+> CPU: Intel(R) Core(TM) i7-7700K (8) @ 4.50 GHz
+> GPU: AMD Radeon Pro 580X [Discrete]
+> Memory: 6.16 GiB / 31.23 GiB (20%)
+> Swap: 0 B / 8.00 GiB (0%)
+> Disk (/): 289.50 GiB / 929.25 GiB (31%) - btrfs
+>
+> ----
+>
 > **Status of the DJI support:** experimental. An `.OSV` opens as one clip
 > with its `.LRF` proxy, stitches from the file's own calibration, reframes,
 > sits on the timeline and exports; GPS and colour mode come from the `.SRT`.
