@@ -19,6 +19,19 @@
 > Swap: 0 B / 8.00 GiB (0%)
 > Disk (/): 289.50 GiB / 929.25 GiB (31%) - btrfs
 >
+> orbis-reframe 0.8.0+50.gefe1b83
+System: Fedora Linux 45 (Workstation Edition), kernel 7.3.3-300.fc45.x86_64
+Qt: 6.11.2 (wayland)
+GPU: unknown (the viewport hasn't started Vulkan)
+Video encoder (export): hevc_vaapi, h264_vaapi
+  H.265 not usable: hevc_nvenc: libnvidia-encode.so.1 not found
+  H.264 not usable: h264_nvenc: libnvidia-encode.so.1 not found
+Sound output: PulseAudio, opened on Built-in Audio Analog Stereo (32-bit Signed Integer, 2 ch, 48000 Hz, 1 x 1440 frames)
+Track subject: ready
+Plate scan: ready
+Voice noise modes: ready
+Models: /usr/local/share/orbis-reframe/models/
+>
 > ----
 >
 > **Status of the DJI support:** experimental. An `.OSV` opens as one clip
